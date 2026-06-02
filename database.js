@@ -914,14 +914,29 @@ function claimDailyBonus(userId) {
     return { success: false, reason: "already_claimed" };
   }
 
+  // Streak: yesterday = consecutive
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isConsecutive = lastBonus && lastBonus.toDateString() === yesterday.toDateString();
+  const currentStreak = user.daily_streak || 0;
+  const newStreak = isConsecutive ? currentStreak + 1 : 1;
+
   const minBonus = parseFloat(getSetting("daily_bonus_min", config.DAILY_BONUS_MIN));
   const maxBonus = parseFloat(getSetting("daily_bonus_max", config.DAILY_BONUS_MAX));
-  const bonus = Math.round((Math.random() * (maxBonus - minBonus) + minBonus) * 100) / 100;
+  let bonus = Math.round((Math.random() * (maxBonus - minBonus) + minBonus) * 100) / 100;
 
-  updateBalance(userId, bonus, "daily_bonus", "Bonus quotidien");
-  db.prepare("UPDATE users SET last_daily_bonus = CURRENT_TIMESTAMP WHERE user_id = ?").run(userId);
+  // Streak multiplier: 3d=1.25x, 7d=1.5x, 14d=1.75x, 30d=2x
+  let multiplier = 1;
+  if (newStreak >= 30) multiplier = 2.0;
+  else if (newStreak >= 14) multiplier = 1.75;
+  else if (newStreak >= 7) multiplier = 1.5;
+  else if (newStreak >= 3) multiplier = 1.25;
+  bonus = Math.round(bonus * multiplier * 100) / 100;
 
-  return { success: true, amount: bonus };
+  updateBalance(userId, bonus, "daily_bonus", `Bonus quotidien (série ${newStreak}j)`);
+  db.prepare("UPDATE users SET last_daily_bonus = CURRENT_TIMESTAMP, daily_streak = ? WHERE user_id = ?").run(newStreak, userId);
+
+  return { success: true, amount: bonus, streak: newStreak, multiplier };
 }
 
 function spinWheel(userId, free = false) {
@@ -1141,6 +1156,22 @@ function getBlacklist() {
   return db.prepare("SELECT * FROM blacklist ORDER BY created_at DESC").all();
 }
 
+function getUserReferrals(userId, limit = 20) {
+  return db.prepare(
+    `SELECT user_id, first_name, username, tasks_completed, created_at
+     FROM users WHERE referred_by = ? ORDER BY created_at DESC LIMIT ?`
+  ).all(userId, limit);
+}
+
+function resetDailyTasksIfNeeded(userId) {
+  const user = getUser(userId);
+  if (!user) return;
+  const today = new Date().toISOString().split("T")[0];
+  if (user.daily_tasks_reset !== today) {
+    db.prepare("UPDATE users SET daily_tasks_done = 0, daily_tasks_reset = ? WHERE user_id = ?").run(today, userId);
+  }
+}
+
 // ============================================
 // EXPORTS
 // ============================================
@@ -1169,6 +1200,8 @@ module.exports = {
   drawGiveaway, getGiveawayEntries,
   // Games
   recordGame, getUserGameHistory, claimDailyBonus, spinWheel,
+  // Users extra
+  getUserReferrals, resetDailyTasksIfNeeded,
   // VIP
   purchaseVIP,
   // Tickets

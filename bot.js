@@ -132,19 +132,6 @@ function currencySymbol(cur) {
   return " " + cur;
 }
 
-// Format avec devise d'affichage (synchrone — utilise un cache)
-const conversionCache = { ton: 2, bnb: 600, lastUpdate: 0 };
-async function updateConversionCache() {
-  try {
-    const prices = await payments.getLivePrices();
-    conversionCache.ton = prices.ton || 2;
-    conversionCache.bnb = prices.bnb || 600;
-    conversionCache.lastUpdate = Date.now();
-  } catch {}
-}
-setInterval(updateConversionCache, 60000);
-updateConversionCache();
-
 function fmt(amountUSD) {
   // Devise interne TOUJOURS en USD
   // Affichage : 4 décimales si < 0.01, sinon 2 décimales
@@ -415,7 +402,8 @@ bot.on("callback_query", async (q) => {
   if (data.startsWith("cf_bet_")) {
     const bet = parseFloat(data.replace("cf_bet_",""));
     user = db.getUser(uid);
-    if (user.balance < bet) return bot.editMessageText("❌ Solde insuffisant.", { chat_id: cid, message_id: mid });
+    const totalCfCheck = (user.balance || 0) + (user.deposit_balance || 0);
+    if (totalCfCheck < bet) return bot.editMessageText("❌ Solde insuffisant.", { chat_id: cid, message_id: mid });
     return bot.editMessageText(
       `🪙 <b>Mise : ${fmt(bet)}</b>\n\nChoisis :`,
       { chat_id: cid, message_id: mid, parse_mode: "HTML",
@@ -806,6 +794,7 @@ async function handleStartTask(cid, uid, taskId, user) {
 async function handleVerifyTask(cid, uid, taskId, user) {
   const task = db.getTask(taskId);
   if (!task) return bot.sendMessage(cid, "❌ Tâche introuvable.");
+  if (task.status !== "active") return bot.sendMessage(cid, "❌ Cette tâche n'est plus disponible.");
 
   const existing = db.db.prepare("SELECT * FROM task_completions WHERE task_id=? AND user_id=?").get(taskId, uid);
   if (!existing) return bot.sendMessage(cid, "❌ Tu n'as pas démarré cette tâche.");
@@ -977,7 +966,8 @@ async function doSpin(cid, mid, uid, free, user) {
   if (free) {
     db.db.prepare("UPDATE users SET free_spins=free_spins-1 WHERE user_id=?").run(uid);
   } else {
-    debitSmart(uid, cost, "spin_bet", `Roue mise ${fmtUSD(cost)}`);
+    if (!debitSmart(uid, cost, "spin_bet", `Roue mise ${fmtUSD(cost)}`))
+      return bot.sendMessage(cid, "❌ Solde insuffisant.");
   }
 
   const won = prize.value || 0;
@@ -1005,7 +995,8 @@ async function playDice(cid, uid, bet, user) {
   const total = (user.balance || 0) + (user.deposit_balance || 0);
   if (total < bet) return bot.sendMessage(cid, "❌ Solde insuffisant !");
 
-  debitSmart(uid, bet, "dice_bet", `Dés mise ${fmtUSD(bet)}`);
+  if (!debitSmart(uid, bet, "dice_bet", `Dés mise ${fmtUSD(bet)}`))
+    return bot.sendMessage(cid, "❌ Solde insuffisant.");
   const diceMsg = await bot.sendDice(cid, { emoji: "🎲" });
   const val = diceMsg.dice.value;
   await new Promise(r => setTimeout(r, 3500));
@@ -1031,10 +1022,14 @@ async function playDice(cid, uid, bet, user) {
 async function playCoinflip(cid, uid, choice, bet, user) {
   user = db.getUser(uid);
   const mult = parseFloat(db.getSetting("coinflip_multiplier", config.COINFLIP.multiplier_win));
+  const minB = parseFloat(db.getSetting("coinflip_min_bet", config.COINFLIP.min_bet));
+  const maxB = parseFloat(db.getSetting("coinflip_max_bet", config.COINFLIP.max_bet));
   const total = (user.balance || 0) + (user.deposit_balance || 0);
-  if (total < bet) return bot.sendMessage(cid, "❌ Solde insuffisant !");
+  if (isNaN(bet) || bet < minB || bet > maxB || total < bet)
+    return bot.sendMessage(cid, "❌ Mise invalide ou solde insuffisant !");
 
-  debitSmart(uid, bet, "cf_bet", `Pile/Face mise ${fmtUSD(bet)}`);
+  if (!debitSmart(uid, bet, "cf_bet", `Pile/Face mise ${fmtUSD(bet)}`))
+    return bot.sendMessage(cid, "❌ Solde insuffisant.");
   // Asymétrie maison : 35% chance utilisateur gagne (mode agressif)
   const userWinsRoll = Math.random() < 0.35;
   const result = userWinsRoll ? choice : (choice === "pile" ? "face" : "pile");
@@ -1068,7 +1063,8 @@ async function playJackpot(cid, uid, user) {
   if (total < cost) return bot.sendMessage(cid, `❌ Solde insuffisant ! Besoin : ${fmt(cost)}`);
 
   // Débiter le ticket
-  debitSmart(uid, cost, "jackpot_bet", `Jackpot ticket ${fmtUSD(cost)}`);
+  if (!debitSmart(uid, cost, "jackpot_bet", `Jackpot ticket ${fmtUSD(cost)}`))
+    return bot.sendMessage(cid, "❌ Solde insuffisant.");
 
   // 50% du ticket va dans le pool, 50% commission admin
   creditAdmin(cost * 0.50, "jackpot");
@@ -1138,7 +1134,8 @@ async function playGuess(cid, uid, guess, user) {
   const total = (user.balance || 0) + (user.deposit_balance || 0);
   if (total < cost) return bot.sendMessage(cid, "❌ Solde insuffisant !");
 
-  debitSmart(uid, cost, "guess_bet", `Devinette`);
+  if (!debitSmart(uid, cost, "guess_bet", `Devinette`))
+    return bot.sendMessage(cid, "❌ Solde insuffisant.");
   const secret = Math.floor(Math.random() * (range[1] - range[0] + 1)) + range[0];
 
   let win = 0;
@@ -1666,11 +1663,10 @@ bot.on("message", async (msg) => {
     const minB = parseFloat(db.getSetting("dice_min_bet", config.DICE_GAME.min_bet));
     const maxB = parseFloat(db.getSetting("dice_max_bet", config.DICE_GAME.max_bet));
     const mult = parseFloat(db.getSetting("dice_multiplier", config.DICE_GAME.multiplier_win));
-    const bets = [0.05,0.10,0.25,0.50,1.00,2.00,5.00].filter(b=>b>=minB&&b<=maxB&&b<=user.balance);
+    const totalD = (user.balance || 0) + (user.deposit_balance || 0);
+    const bets = [0.05,0.10,0.25,0.50,1.00,2.00,5.00].filter(b=>b>=minB&&b<=maxB&&b<=totalD);
     if (!bets.length) return bot.sendMessage(cid, `❌ Solde insuffisant. Min : ${fmt(minB)}`);
     const rows = [];
-    for (let i=0;i<bets.length;i+=3) rows.push(bets.slice(i,i+3).map(b=>({ text: fmt(b), callback_data:`dice_${b}` })));
-    const totalD = (user.balance || 0) + (user.deposit_balance || 0);
     return bot.sendMessage(cid,
       `🎲 <b>DÉS</b>\n\n` +
       `Choisis ta mise et lance les dés !\n` +
@@ -1683,11 +1679,10 @@ bot.on("message", async (msg) => {
     const minB = parseFloat(db.getSetting("coinflip_min_bet", config.COINFLIP.min_bet));
     const maxB = parseFloat(db.getSetting("coinflip_max_bet", config.COINFLIP.max_bet));
     const mult = parseFloat(db.getSetting("coinflip_multiplier", config.COINFLIP.multiplier_win));
-    const bets = [0.05,0.10,0.25,0.50,1.00,2.00,5.00].filter(b=>b>=minB&&b<=maxB&&b<=user.balance);
+    const totalC = (user.balance || 0) + (user.deposit_balance || 0);
+    const bets = [0.05,0.10,0.25,0.50,1.00,2.00,5.00].filter(b=>b>=minB&&b<=maxB&&b<=totalC);
     if (!bets.length) return bot.sendMessage(cid, `❌ Solde insuffisant. Min : ${fmt(minB)}`);
     const rows = [];
-    for (let i=0;i<bets.length;i+=3) rows.push(bets.slice(i,i+3).map(b=>({ text: fmt(b), callback_data:`cf_bet_${b}` })));
-    const totalC = (user.balance || 0) + (user.deposit_balance || 0);
     return bot.sendMessage(cid,
       `🪙 <b>PILE / FACE</b>\n\n` +
       `Devine le bon côté et gagne !\n\n` +
@@ -1928,31 +1923,35 @@ bot.on("message", async (msg) => {
       expiresAt = new Date(Date.now() + 30 * 24 * 3600000).toISOString();
     }
 
-    // Vérifier solde total (gains + dépôt)
-    const total = (user.balance || 0) + (user.deposit_balance || 0);
-    if (total < realBudget) {
-      return bot.sendMessage(cid, `❌ Solde total insuffisant.\n💰 Gains : ${fmt(user.balance)}\n💳 Dépôt : ${fmt(user.deposit_balance || 0)}`, { parse_mode: "HTML" });
-    }
-
-    // Débiter en mode smart (d'abord du dépôt)
-    debitSmart(uid, realBudget, "task_creation", `Campagne: ${data.title}`);
-
-    // Insérer la tâche directement (sans utiliser createTask qui refait updateBalance)
+    // Débiter et insérer dans une transaction atomique (rollback automatique si l'INSERT échoue)
     const feePctInsert = parseFloat(db.getSetting("task_fee_percent", "20"));
     const platformFeeInsert = Math.round(data.reward * (feePctInsert / 100) * 10000) / 10000;
     const descText = (data.type === "bot" || data.type === "miniapp")
       ? `Temps d'attente : ${data.durationSeconds}s`
       : `Reste abonné ${data.durationHours}h minimum`;
-    const insertResult = db.db.prepare(`
-      INSERT INTO tasks (creator_id, type, title, description, link, chat_id, proof_required, proof_instructions, reward, platform_fee, max_completions, budget, budget_remaining, countries, min_level, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, NULL, 1, ?)
-    `).run(
-      uid, data.type, data.title, descText,
-      data.link, data.chatId || null,
-      data.reward, platformFeeInsert, maxC, realBudget, realBudget, expiresAt
-    );
-    const taskId = insertResult.lastInsertRowid;
-    db.db.prepare("UPDATE users SET tasks_created = tasks_created + 1 WHERE user_id = ?").run(uid);
+
+    let taskId;
+    try {
+      db.db.transaction(() => {
+        if (!debitSmart(uid, realBudget, "task_creation", `Campagne: ${data.title}`))
+          throw new Error("debit_failed");
+        const insertResult = db.db.prepare(`
+          INSERT INTO tasks (creator_id, type, title, description, link, chat_id, proof_required, proof_instructions, reward, platform_fee, max_completions, budget, budget_remaining, countries, min_level, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, NULL, 1, ?)
+        `).run(
+          uid, data.type, data.title, descText,
+          data.link, data.chatId || null,
+          data.reward, platformFeeInsert, maxC, realBudget, realBudget, expiresAt
+        );
+        taskId = insertResult.lastInsertRowid;
+        db.db.prepare("UPDATE users SET tasks_created = tasks_created + 1 WHERE user_id = ?").run(uid);
+      })();
+    } catch (e) {
+      if (e.message === "debit_failed")
+        return bot.sendMessage(cid, `❌ Solde insuffisant.\n💰 Gains : ${fmt(user.balance)}\n💳 Dépôt : ${fmt(user.deposit_balance || 0)}`, { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+      console.error("Task creation error:", e.message);
+      return bot.sendMessage(cid, "❌ Erreur lors de la création.", { reply_markup: KB_MAIN(uid) });
+    }
 
     clearState(uid);
     if (!taskId) return bot.sendMessage(cid, "❌ Erreur création.", { reply_markup: KB_MAIN(uid) });
@@ -2125,8 +2124,17 @@ payments.startAutoDepositChecker(db, config, async (deposit, usdAmount, tx) => {
     if (!user) return;
 
     // Bascule balance normale → deposit_balance (confirmDeposit a crédité balance)
-    db.updateBalance(deposit.user_id, -usdAmount, "deposit_correction", "Bascule vers deposit_balance");
-    creditDeposit(deposit.user_id, usdAmount);
+    const corrected = db.updateBalance(deposit.user_id, -usdAmount, "deposit_correction", "Bascule vers deposit_balance");
+    if (corrected) creditDeposit(deposit.user_id, usdAmount);
+    else {
+      // La balance a déjà été partiellement dépensée : créditer seulement le montant réellement déductible
+      const uNow = db.getUser(deposit.user_id);
+      const available = Math.min(uNow ? (uNow.balance || 0) : 0, usdAmount);
+      if (available > 0) {
+        db.updateBalance(deposit.user_id, -available, "deposit_correction", "Bascule partielle vers deposit_balance");
+        creditDeposit(deposit.user_id, available);
+      }
+    }
 
     await bot.sendMessage(deposit.user_id,
       `✅ <b>Dépôt confirmé automatiquement !</b>\n\n` +

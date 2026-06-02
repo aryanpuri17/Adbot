@@ -36,6 +36,10 @@ try {
     db.db.prepare("ALTER TABLE users ADD COLUMN deposit_balance REAL DEFAULT 0").run();
     console.log("✅ Migration: deposit_balance ajouté");
   }
+  if (!cols.find(c => c.name === "daily_streak")) {
+    db.db.prepare("ALTER TABLE users ADD COLUMN daily_streak INTEGER DEFAULT 0").run();
+    console.log("✅ Migration: daily_streak ajouté");
+  }
 } catch (e) { console.error("Migration error:", e.message); }
 
 // ─────────────────────────────────────────────
@@ -190,15 +194,16 @@ function KB_MAIN(uid) {
   const rows = [
     ["💳 Balance",  "📋 Tâches"],
     ["🎮 Jeux",     "🏆 Concours"],
-    ["👥 Parrainage","🎫 Support"],
+    ["👥 Parrainage","🎁 Bonus"],
+    ["📊 Profil",   "🎫 Support"],
     ["⚙️ Paramètres"],
   ];
   if (isAdmin(uid)) rows.push(["👑 Admin"]);
   return KB(rows);
 }
 
-const KB_BALANCE  = KB([["💳 Déposer","🏧 Retirer"],["📋 Historique"],["🏠 Accueil"]]);
-const KB_TASKS    = KB([["📢 Canaux","👥 Groupes"],["🤖 Bots","🎮 Mini Apps"],["➕ Créer Campagne"],["🏠 Accueil"]]);
+const KB_BALANCE  = KB([["💳 Déposer","🏧 Retirer"],["📋 Historique","📜 Transactions"],["🏠 Accueil"]]);
+const KB_TASKS    = KB([["📢 Canaux","👥 Groupes"],["🤖 Bots","🎮 Mini Apps"],["➕ Créer Campagne","📊 Mes Campagnes"],["🏠 Accueil"]]);
 const KB_GAMES    = KB([["🎡 Roue Fortune"],["🎲 Dés","🪙 Pile/Face"],["🏆 Jackpot","🔢 Devinette"],["🏠 Accueil"]]);
 const KB_PARRAIN  = KB([["🔗 Mon Lien"],["🏠 Accueil"]]);
 const KB_ADMIN    = KB([
@@ -309,8 +314,18 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
 
   // Captcha pour nouveaux users non vérifiés
   if (!user.is_verified) {
+    const botName = db.getSetting("bot_name","ADCRYPTON");
+    const refBonus = parseFloat(db.getSetting("referral_bonus", config.REFERRAL_BONUS));
+    const dailyMin = parseFloat(db.getSetting("daily_bonus_min", config.DAILY_BONUS_MIN));
+    const dailyMax = parseFloat(db.getSetting("daily_bonus_max", config.DAILY_BONUS_MAX));
     await bot.sendMessage(cid,
-      `👋 <b>Bienvenue sur ${db.getSetting("bot_name","ADCRYPTON")} !</b>\n\n🛡️ Une vérification rapide d'abord :`,
+      `🎉 <b>Bienvenue sur ${botName} !</b>\n\n` +
+      `💰 Gagne de l'argent réel en :\n` +
+      `   ✅ Complétant des tâches Telegram\n` +
+      `   👥 Parrainant tes amis (+${fmt(refBonus)}/filleul)\n` +
+      `   🎁 Bonus quotidien (${fmt(dailyMin)}–${fmt(dailyMax)}/jour)\n` +
+      `   🎮 Mini-jeux (Roue, Dés, Jackpot...)\n\n` +
+      `🛡️ Vérifions d'abord que tu n'es pas un robot :`,
       { parse_mode: "HTML" });
     return sendCaptcha(cid, uid);
   }
@@ -378,6 +393,10 @@ bot.on("callback_query", async (q) => {
       return sendHome(cid, user);
     }
     return bot.answerCallbackQuery(q.id, { text: "❌ Rejoins tous les canaux d'abord !", show_alert: true }).catch(() => {});
+  }
+
+  if (data === "claim_daily_bonus") {
+    return claimBonus(cid, uid);
   }
 
   // ─── Tâches ───
@@ -609,6 +628,22 @@ bot.on("callback_query", async (q) => {
       { parse_mode: "HTML", reply_markup: KB_CANCEL });
   }
 
+  // Admin — Tickets
+  if (data.startsWith("reply_ticket_")) {
+    const tid = parseInt(data.replace("reply_ticket_",""));
+    const t = db.getTicket(tid);
+    if (!t) return bot.sendMessage(cid, "❌ Ticket introuvable.");
+    setState(uid, "ticket_reply", { ticketId: tid, userId: t.user_id, firstName: t.first_name });
+    return bot.sendMessage(cid,
+      `💬 <b>Répondre à ${esc(t.first_name)} :</b>\n\n"${esc((t.message || "").substring(0,150))}"`,
+      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+  }
+  if (data.startsWith("close_ticket_")) {
+    const tid = parseInt(data.replace("close_ticket_",""));
+    db.closeTicket(tid);
+    return bot.editMessageText((q.message.text || "") + "\n\n✅ FERMÉ", { chat_id: cid, message_id: mid }).catch(() => {});
+  }
+
   // Admin — Devise
   if (data.startsWith("setcur_")) {
     const parts = data.split("_");
@@ -624,6 +659,7 @@ bot.on("callback_query", async (q) => {
 // ─────────────────────────────────────────────
 
 function sendHome(cid, user) {
+  db.resetDailyTasksIfNeeded(user.user_id);
   user = db.getUser(user.user_id);
   const botName = db.getSetting("bot_name", "ADCRYPTON");
   const maxT    = db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY);
@@ -631,6 +667,9 @@ function sendHome(cid, user) {
 
   const earnedBal = user.balance || 0;
   const depBal    = user.deposit_balance || 0;
+  const streak    = user.daily_streak || 0;
+  const lastBonus = user.last_daily_bonus ? new Date(user.last_daily_bonus) : null;
+  const bonusReady = !lastBonus || new Date().toDateString() !== lastBonus.toDateString();
 
   bot.sendMessage(cid,
     `╔════════════════════╗\n` +
@@ -641,6 +680,8 @@ function sendHome(cid, user) {
     `💳 Dépôt : <b>${fmt(depBal)}</b>\n` +
     `✅ Tâches : <b>${user.tasks_completed}</b> | 👥 Filleuls : <b>${user.referral_count}</b>\n` +
     `📅 Aujourd'hui : <b>${user.daily_tasks_done}/${maxT}</b>` +
+    (streak > 0 ? `\n🔥 Série bonus : <b>${streak} jour${streak > 1 ? "s" : ""}</b>` : "") +
+    (bonusReady ? `\n🎁 <b>Bonus disponible !</b>` : "") +
     (jackpot > 0 ? `\n🎰 Jackpot : <b>${fmt(jackpot)}</b>` : ""),
     { parse_mode: "HTML", reply_markup: KB_MAIN(user.user_id) });
 }
@@ -1243,16 +1284,29 @@ async function drawGiveawayManually(cid, gaId) {
 
 async function showReferral(cid, user) {
   if (!botInfo) botInfo = await bot.getMe();
+  user = db.getUser(user.user_id);
   const link  = `https://t.me/${botInfo.username}?start=ref_${user.user_id}`;
   const bonus = db.getSetting("referral_bonus", config.REFERRAL_BONUS);
   const pct   = db.getSetting("referral_percent", config.REFERRAL_PERCENT);
+  const referrals = db.getUserReferrals(user.user_id, 5);
+
+  let refListTxt = "\n<b>Tes 5 derniers filleuls :</b>\n";
+  if (!referrals.length) {
+    refListTxt += "Aucun filleul pour le moment.\n";
+  } else {
+    referrals.forEach((r, i) => {
+      refListTxt += `${i+1}. ${esc(r.first_name)} — ✅ ${r.tasks_completed} tâches\n`;
+    });
+  }
 
   bot.sendMessage(cid,
     `┌─────────────────────┐\n  👥 <b>PARRAINAGE</b>\n└─────────────────────┘\n\n` +
     `🔗 Ton lien :\n<code>${link}</code>\n\n` +
     `💰 Bonus par filleul : <b>${fmt(bonus)}</b>\n` +
     `📊 Commission gains : <b>${pct}%</b>\n` +
-    `👥 Tes filleuls : <b>${user.referral_count}</b>`,
+    `👥 Total filleuls : <b>${user.referral_count}</b>\n` +
+    `💸 Gains parrainage : <b>${fmt(user.referral_earnings || 0)}</b>\n` +
+    refListTxt,
     { parse_mode: "HTML", reply_markup: KB_PARRAIN });
 }
 
@@ -1260,13 +1314,179 @@ async function showReferral(cid, user) {
 //  BONUS QUOTIDIEN
 // ─────────────────────────────────────────────
 
-function claimBonus(cid, uid, user) {
+function claimBonus(cid, uid) {
   const r = db.claimDailyBonus(uid);
-  if (!r) return bot.sendMessage(cid, `🎁 Déjà réclamé !\nProchain dans 24h.`);
+  if (!r || !r.success) {
+    const u = db.getUser(uid);
+    const lastB = u && u.last_daily_bonus ? new Date(u.last_daily_bonus) : null;
+    const hoursLeft = lastB ? Math.max(0, Math.ceil((lastB.getTime() + 86400000 - Date.now()) / 3600000)) : 0;
+    return bot.sendMessage(cid, `⏰ <b>Déjà réclamé !</b>\n\nProchain bonus dans <b>${hoursLeft}h</b>`, { parse_mode: "HTML" });
+  }
   const nu = db.getUser(uid);
+  const streakTxt = r.streak > 1 ? `\n🔥 Série : <b>${r.streak} jours</b>` + (r.multiplier > 1 ? ` (x${r.multiplier})` : "") : "";
   bot.sendMessage(cid,
-    `🎁 <b>Bonus réclamé !</b>\n\n💰 +${fmt(r.amount)}\n💵 Balance : ${fmt(nu.balance)}`,
-    { parse_mode: "HTML" });
+    `🎁 <b>Bonus réclamé !</b>\n\n💰 +${fmt(r.amount)} ajouté à tes gains !${streakTxt}\n\n💵 Balance : ${fmt(nu.balance)}`,
+    { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+}
+
+function showDailyBonus(cid, uid, user) {
+  user = db.getUser(uid);
+  const lastBonus = user.last_daily_bonus ? new Date(user.last_daily_bonus) : null;
+  const now = new Date();
+  const alreadyClaimed = lastBonus && now.toDateString() === lastBonus.toDateString();
+  const streak = user.daily_streak || 0;
+
+  const minB = parseFloat(db.getSetting("daily_bonus_min", config.DAILY_BONUS_MIN));
+  const maxB = parseFloat(db.getSetting("daily_bonus_max", config.DAILY_BONUS_MAX));
+  let multiplier = 1;
+  if (streak >= 30) multiplier = 2.0;
+  else if (streak >= 14) multiplier = 1.75;
+  else if (streak >= 7) multiplier = 1.5;
+  else if (streak >= 3) multiplier = 1.25;
+
+  let streakLabel = "";
+  if (streak >= 30) streakLabel = "💎 Légendaire (x2.0)";
+  else if (streak >= 14) streakLabel = "🥇 Or (x1.75)";
+  else if (streak >= 7) streakLabel = "🥈 Argent (x1.5)";
+  else if (streak >= 3) streakLabel = "🥉 Bronze (x1.25)";
+  else streakLabel = "🆕 Commence une série !";
+
+  const milestones = [3, 7, 14, 30];
+  const nextMilestone = milestones.find(m => m > streak) || 30;
+
+  let timeTxt = "";
+  if (alreadyClaimed && lastBonus) {
+    const nextBonusTime = new Date(lastBonus);
+    nextBonusTime.setDate(nextBonusTime.getDate() + 1);
+    nextBonusTime.setHours(0, 0, 0, 0);
+    const msLeft = Math.max(0, nextBonusTime.getTime() - now.getTime());
+    const h = Math.floor(msLeft / 3600000);
+    const m = Math.floor((msLeft % 3600000) / 60000);
+    timeTxt = `\n⏰ Prochain bonus dans : <b>${h}h ${m}min</b>`;
+  }
+
+  const baseRange = `${(minB * multiplier).toFixed(4)}$ – ${(maxB * multiplier).toFixed(4)}$`;
+
+  bot.sendMessage(cid,
+    `┌─────────────────────┐\n  🎁 <b>BONUS QUOTIDIEN</b>\n└─────────────────────┘\n\n` +
+    `🔥 Série actuelle : <b>${streak} jour${streak > 1 ? "s" : ""}</b>\n` +
+    `${streakLabel}\n\n` +
+    `💰 Bonus aujourd'hui : <b>${baseRange}</b>\n` +
+    (multiplier > 1 ? `✨ Multiplicateur série : <b>x${multiplier}</b>\n` : "") +
+    `📈 Prochain palier : <b>${nextMilestone} jours</b>` +
+    (alreadyClaimed
+      ? `\n\n✅ <b>Déjà réclamé aujourd'hui !${timeTxt}</b>`
+      : `\n\n🎯 <b>Prêt à réclamer !</b>`),
+    { parse_mode: "HTML",
+      reply_markup: alreadyClaimed
+        ? KB([["🏠 Accueil"]])
+        : KBI([[{ text: "🎁 Réclamer mon bonus !", callback_data: "claim_daily_bonus" }]]) });
+}
+
+function showProfile(cid, uid) {
+  const user = db.getUser(uid);
+  if (!user) return;
+  const thresholds = config.LEVEL_THRESHOLDS;
+  const lvl = user.level || 1;
+  const xp = user.xp || 0;
+  const currThresh = thresholds[lvl - 1] || 0;
+  const nextThresh = lvl < thresholds.length ? thresholds[lvl] : thresholds[thresholds.length - 1];
+  const pctRaw = lvl >= thresholds.length ? 10 : Math.round(((xp - currThresh) / Math.max(nextThresh - currThresh, 1)) * 10);
+  const pct = Math.max(0, Math.min(10, pctRaw));
+  const bar = "█".repeat(pct) + "░".repeat(10 - pct);
+
+  const vipNames = { 0: "", 1: "🥉 Bronze", 2: "🥈 Silver", 3: "🥇 Gold", 4: "💎 Diamond" };
+  const vipBadge = vipNames[user.vip_level || 0] || "";
+
+  const rankRow = db.db.prepare("SELECT COUNT(*) as r FROM users WHERE total_earned > ? AND is_banned = 0").get(user.total_earned || 0);
+  const rank = (rankRow?.r || 0) + 1;
+  const streak = user.daily_streak || 0;
+
+  bot.sendMessage(cid,
+    `┌─────────────────────┐\n  📊 <b>MON PROFIL</b>\n└─────────────────────┘\n\n` +
+    `👤 <b>${esc(user.first_name)}</b>${vipBadge ? ` ${vipBadge}` : ""}\n` +
+    `🆔 <code>${user.user_id}</code>\n\n` +
+    `🏆 Niveau <b>${lvl}</b>\n` +
+    `⚡ XP : <b>${xp}</b> / <b>${nextThresh}</b>\n` +
+    `[${bar}] ${pct * 10}%\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `✅ Tâches complétées : <b>${user.tasks_completed}</b>\n` +
+    `💰 Total gagné : <b>${fmt(user.total_earned)}</b>\n` +
+    `👥 Filleuls : <b>${user.referral_count}</b>\n` +
+    `💸 Gains parrainage : <b>${fmt(user.referral_earnings || 0)}</b>\n` +
+    `🔥 Série bonus : <b>${streak} jour${streak > 1 ? "s" : ""}</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `🏅 Classement : <b>#${rank}</b>\n` +
+    `📅 Inscrit le : <b>${fmtDate(user.created_at)}</b>`,
+    { parse_mode: "HTML",
+      reply_markup: KB([["🏅 Classement", "📜 Transactions"], ["🏠 Accueil"]]) });
+}
+
+function showLeaderboard(cid, uid) {
+  const topEarners   = db.getTopUsers("earned", 10);
+  const topTasks     = db.getTopUsers("tasks", 10);
+  const topReferrers = db.getTopUsers("referrals", 10);
+  const medals = ["🥇", "🥈", "🥉"];
+
+  const myRankRow = db.db.prepare("SELECT COUNT(*) as r FROM users WHERE total_earned > ? AND is_banned = 0").get((db.getUser(uid) || {}).total_earned || 0);
+  const myRank = (myRankRow?.r || 0) + 1;
+
+  let txt = `┌─────────────────────┐\n  🏅 <b>CLASSEMENT</b>\n└─────────────────────┘\n\n`;
+
+  txt += `💰 <b>Top Gains</b>\n`;
+  topEarners.forEach((u, i) => { txt += `${medals[i] || `${i+1}.`} ${esc(u.first_name)} — ${fmt(u.total_earned)}\n`; });
+
+  txt += `\n📋 <b>Top Tâches</b>\n`;
+  topTasks.forEach((u, i) => { txt += `${medals[i] || `${i+1}.`} ${esc(u.first_name)} — ${u.tasks_completed} tâches\n`; });
+
+  txt += `\n👥 <b>Top Parrainage</b>\n`;
+  topReferrers.forEach((u, i) => { txt += `${medals[i] || `${i+1}.`} ${esc(u.first_name)} — ${u.referral_count} filleuls\n`; });
+
+  txt += `\n━━━━━━━━━━━━━━━━━━━━\n🏅 Ton rang : <b>#${myRank}</b>`;
+
+  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB([["🏠 Accueil"]]) });
+}
+
+function showMyCampaigns(cid, uid) {
+  const tasks = db.getUserTasks(uid);
+  let txt = `┌─────────────────────┐\n  📊 <b>MES CAMPAGNES</b>\n└─────────────────────┘\n\n`;
+  if (!tasks.length) {
+    txt += "Aucune campagne créée.\n\n💡 Crée ta première campagne via ➕ Créer Campagne !";
+    return bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB_TASKS });
+  }
+  const statusEmoji = { pending:"⏳", active:"✅", completed:"🏁", rejected:"❌", paused:"⏸" };
+  tasks.slice(0, 10).forEach(t => {
+    const emoji = statusEmoji[t.status] || "❓";
+    const pct = t.max_completions > 0 ? Math.round((t.current_completions / t.max_completions) * 100) : 0;
+    txt += `${emoji} <b>${esc(t.title)}</b>\n` +
+           `   📊 ${t.current_completions}/${t.max_completions} (${pct}%) | 💰 ${fmt(t.budget_remaining)}\n\n`;
+  });
+  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB_TASKS });
+}
+
+function showTransactions(cid, uid) {
+  const txs = db.getUserTransactions(uid, 15);
+  let txt = `┌─────────────────────┐\n  📜 <b>TRANSACTIONS</b>\n└─────────────────────┘\n\n`;
+  if (!txs.length) {
+    txt += "Aucune transaction.";
+  } else {
+    const typeEmoji = {
+      welcome_bonus:"🎁", daily_bonus:"🎁", task_reward:"✅",
+      referral_bonus:"👥", referral_commission:"👥",
+      spin_win:"🎡", dice_win:"🎲", cf_win:"🪙", jackpot_win:"🏆", guess_win:"🔢",
+      deposit:"💳", withdrawal_pending:"🏧", withdrawal_refund:"🔄",
+      task_creation:"➕", level_up:"⭐", admin_edit:"⚙️",
+      giveaway_win:"🏆", spin_bet:"🎡", dice_bet:"🎲", cf_bet:"🪙",
+      jackpot_bet:"🏆", guess_bet:"🔢",
+    };
+    txs.forEach(tx => {
+      const sign = tx.amount > 0 ? "+" : "";
+      const emoji = typeEmoji[tx.type] || "💫";
+      const desc = (tx.description || tx.type).substring(0, 40);
+      txt += `${emoji} <b>${sign}${fmt(tx.amount)}</b> — ${esc(desc)}\n`;
+    });
+  }
+  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB([["🏠 Accueil"]]) });
 }
 
 // ─────────────────────────────────────────────
@@ -1346,10 +1566,22 @@ function showSupport(cid, uid) {
 // ─────────────────────────────────────────────
 
 function showSettings(cid, user) {
+  user = db.getUser(user.user_id);
+  const vipNames = { 0:"Aucun", 1:"🥉 Bronze", 2:"🥈 Silver", 3:"🥇 Gold", 4:"💎 Diamond" };
+  const minW = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
+  const feeP = parseFloat(db.getSetting("withdrawal_fee_percent", config.WITHDRAWAL_FEE_PERCENT));
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  ⚙️ <b>PARAMÈTRES</b>\n└─────────────────────┘\n\n` +
-    `👤 ${esc(user.first_name)}\n🆔 <code>${user.user_id}</code>\n💱 Devise : <b>${getDisplayCurrency()}</b>`,
-    { parse_mode: "HTML" });
+    `┌─────────────────────┐\n  ⚙️ <b>MON COMPTE</b>\n└─────────────────────┘\n\n` +
+    `👤 <b>${esc(user.first_name)}</b>\n` +
+    `🆔 <code>${user.user_id}</code>\n` +
+    `🏆 Niveau <b>${user.level || 1}</b> | ⚡ ${user.xp || 0} XP\n` +
+    `💎 VIP : <b>${vipNames[user.vip_level || 0]}</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `🔗 Code parrainage :\n<code>${user.referral_code || "N/A"}</code>\n\n` +
+    `📊 Min retrait : <b>${fmt(minW)}</b>\n` +
+    `💸 Frais retrait : <b>${feeP}%</b>\n` +
+    `📅 Inscrit : <b>${fmtDate(user.created_at)}</b>`,
+    { parse_mode: "HTML", reply_markup: KB([["📊 Profil", "👥 Parrainage"], ["🏠 Accueil"]]) });
 }
 
 // ─────────────────────────────────────────────
@@ -1533,9 +1765,14 @@ function showAdminDeposits(cid) {
 function showAdminTickets(cid) {
   const tickets = db.getOpenTickets();
   if (!tickets.length) return bot.sendMessage(cid, "✅ Aucun ticket ouvert.");
-  let txt = `🎫 <b>TICKETS (${tickets.length})</b>\n\n`;
-  tickets.slice(0,10).forEach(t => { txt += `#${t.ticket_id} | ${esc(t.first_name)} : ${esc(t.subject)}\n${esc(t.message?.substring(0,100) || "")}\n\n`; });
-  bot.sendMessage(cid, txt, { parse_mode: "HTML" });
+  tickets.slice(0, 8).forEach(t => {
+    bot.sendMessage(cid,
+      `🎫 <b>Ticket #${t.ticket_id}</b>\n👤 ${esc(t.first_name)} (${t.user_id})\n\n💬 ${esc((t.message || "").substring(0, 300))}`,
+      { parse_mode: "HTML", reply_markup: KBI([[
+        { text: "💬 Répondre",  callback_data: `reply_ticket_${t.ticket_id}` },
+        { text: "✅ Fermer",    callback_data: `close_ticket_${t.ticket_id}` }
+      ]]) });
+  });
 }
 
 function showAdminGiveaways(cid) {
@@ -1571,6 +1808,9 @@ bot.on("message", async (msg) => {
   let user = db.getUser(uid);
   if (!user) return;
   if (user.is_banned) return;
+
+  db.resetDailyTasksIfNeeded(uid);
+  user = db.getUser(uid);
 
   const st = getState(uid);
 
@@ -1621,6 +1861,8 @@ bot.on("message", async (msg) => {
   if (text === "🎮 Jeux")       { clearState(uid); return showGames(cid, user); }
   if (text === "🏆 Concours")   { clearState(uid); return showGiveaways(cid); }
   if (text === "👥 Parrainage") { clearState(uid); return showReferral(cid, user); }
+  if (text === "🎁 Bonus")      { clearState(uid); return showDailyBonus(cid, uid, user); }
+  if (text === "📊 Profil")     { clearState(uid); return showProfile(cid, uid); }
   if (text === "🎫 Support")    { clearState(uid); return showSupport(cid, uid); }
   if (text === "⚙️ Paramètres"){ clearState(uid); return showSettings(cid, user); }
   if (text === "👑 Admin" && isAdmin(uid)) { clearState(uid); return showAdmin(cid); }
@@ -1628,7 +1870,8 @@ bot.on("message", async (msg) => {
   // ─── Balance ───
   if (text === "💳 Déposer")    { clearState(uid); return showDeposit(cid); }
   if (text === "🏧 Retirer")    { clearState(uid); return showWithdraw(cid, user); }
-  if (text === "📋 Historique") { clearState(uid); return showHistory(cid, uid); }
+  if (text === "📋 Historique")  { clearState(uid); return showHistory(cid, uid); }
+  if (text === "📜 Transactions"){ clearState(uid); return showTransactions(cid, uid); }
 
   // ─── Tâches ───
   const typeMap = {
@@ -1638,7 +1881,9 @@ bot.on("message", async (msg) => {
     "🎮 Mini Apps":"miniapp",
   };
   if (typeMap[text]) { clearState(uid); return showTasksByType(cid, uid, typeMap[text], user); }
-  if (text === "➕ Créer Campagne")  { clearState(uid); return showCreateCampaign(cid, user); }
+  if (text === "➕ Créer Campagne")   { clearState(uid); return showCreateCampaign(cid, user); }
+  if (text === "📊 Mes Campagnes")   { clearState(uid); return showMyCampaigns(cid, uid); }
+  if (text === "🏅 Classement")      { clearState(uid); return showLeaderboard(cid, uid); }
 
   // ─── Jeux ───
   if (text === "🎡 Roue Fortune") {
@@ -1666,12 +1911,12 @@ bot.on("message", async (msg) => {
     const totalD = (user.balance || 0) + (user.deposit_balance || 0);
     const bets = [0.05,0.10,0.25,0.50,1.00,2.00,5.00].filter(b=>b>=minB&&b<=maxB&&b<=totalD);
     if (!bets.length) return bot.sendMessage(cid, `❌ Solde insuffisant. Min : ${fmt(minB)}`);
-    const rows = [];
+    const rows = bets.reduce((acc,b,i) => { if(i%3===0) acc.push([]); acc[acc.length-1].push({text:`${fmt(b)}`,callback_data:`dice_${b}`}); return acc; }, []);
     return bot.sendMessage(cid,
       `🎲 <b>DÉS</b>\n\n` +
-      `Choisis ta mise et lance les dés !\n` +
-      `Un bon score = tu gagnes !\n\n` +
-      `💵 Ton solde : ${fmt(totalD)}`,
+      `Lance les dés — un 5 ou 6 = <b>x${mult}</b> !\n\n` +
+      `💵 Ton solde : <b>${fmt(totalD)}</b>\n\n` +
+      `Choisis ta mise :`,
       { parse_mode: "HTML", reply_markup: KBI(rows) });
   }
   if (text === "🪙 Pile/Face") {
@@ -1682,11 +1927,12 @@ bot.on("message", async (msg) => {
     const totalC = (user.balance || 0) + (user.deposit_balance || 0);
     const bets = [0.05,0.10,0.25,0.50,1.00,2.00,5.00].filter(b=>b>=minB&&b<=maxB&&b<=totalC);
     if (!bets.length) return bot.sendMessage(cid, `❌ Solde insuffisant. Min : ${fmt(minB)}`);
-    const rows = [];
+    const rows = bets.reduce((acc,b,i) => { if(i%3===0) acc.push([]); acc[acc.length-1].push({text:`${fmt(b)}`,callback_data:`cf_bet_${b}`}); return acc; }, []);
     return bot.sendMessage(cid,
       `🪙 <b>PILE / FACE</b>\n\n` +
-      `Devine le bon côté et gagne !\n\n` +
-      `💵 Ton solde : ${fmt(totalC)}`,
+      `Bonne réponse = <b>x${mult}</b> ta mise !\n\n` +
+      `💵 Ton solde : <b>${fmt(totalC)}</b>\n\n` +
+      `Choisis ta mise :`,
       { parse_mode: "HTML", reply_markup: KBI(rows) });
   }
   if (text === "🏆 Jackpot") {
@@ -2100,11 +2346,22 @@ bot.on("message", async (msg) => {
       { parse_mode: "HTML", reply_markup: KB_ADMIN });
   }
 
+  // Admin — Réponse ticket
+  if (s === "ticket_reply" && isAdmin(uid)) {
+    clearState(uid);
+    const { ticketId, userId, firstName } = data;
+    db.respondToTicket(ticketId, text, uid);
+    bot.sendMessage(userId,
+      `💬 <b>Réponse du support :</b>\n\n${esc(text)}\n\n✅ Pour répondre, envoie un nouveau message via 🎫 Support.`,
+      { parse_mode: "HTML" }).catch(() => {});
+    return bot.sendMessage(cid, `✅ Réponse envoyée à ${esc(firstName || String(userId))} (ticket #${ticketId}).`, { reply_markup: KB_ADMIN });
+  }
+
   // Support
   if (s === "support_msg") {
     clearState(uid);
     db.createTicket(uid, "Support", text);
-    bot.sendMessage(cid, "✅ Message envoyé !", { reply_markup: KB_MAIN(uid) });
+    bot.sendMessage(cid, "✅ Message envoyé !\n\nNous vous répondrons dès que possible.", { reply_markup: KB_MAIN(uid) });
     for (const aid of config.ADMIN_IDS) {
       bot.sendMessage(aid, `🎫 <b>Ticket</b>\n👤 ${esc(user.first_name)} (${uid})\n💬 ${esc(text)}`, { parse_mode: "HTML" }).catch(() => {});
     }

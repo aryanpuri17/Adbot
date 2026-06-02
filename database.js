@@ -359,7 +359,7 @@ function updateBalance(userId, amount, type, description, referenceId = null) {
 
   db.prepare("UPDATE users SET balance = ?, last_active = CURRENT_TIMESTAMP WHERE user_id = ?").run(newBalance, userId);
 
-  if (amount > 0 && type.includes("reward") || type.includes("task")) {
+  if (amount > 0 && (type.includes("reward") || type.includes("task"))) {
     db.prepare("UPDATE users SET total_earned = total_earned + ? WHERE user_id = ?").run(amount, userId);
   }
 

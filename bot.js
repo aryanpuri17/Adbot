@@ -1140,32 +1140,37 @@ async function handleStartTask(cid, uid, taskId, user) {
 
   // ─── BOT TELEGRAM ou MINI APP ───
   if (task.type === "bot" || task.type === "miniapp") {
-    // Démarrer la complétion : INSERT direct, fiable
+    // Extraire le username du bot cible depuis le lien
+    let targetUsername = (task.link || "").trim()
+      .replace(/https?:\/\/t\.me\//i, "")
+      .replace(/^@/, "")
+      .split("/")[0].split("?")[0];
+
     if (!existing) {
-      const secsWait = parseInt(db.getSetting("bot_wait_seconds", "30"));
-      const mustStayUntil = new Date(Date.now() + secsWait * 1000).toISOString();
       try {
         db.db.prepare(
-          "INSERT INTO task_completions (task_id, user_id, reward, must_stay_until, status) VALUES (?, ?, ?, ?, 'pending')"
-        ).run(taskId, uid, task.reward, mustStayUntil);
+          "INSERT INTO task_completions (task_id, user_id, reward, status) VALUES (?, ?, ?, 'pending')"
+        ).run(taskId, uid, task.reward);
       } catch (e) {
         console.error("Insert completion error:", e.message);
         return bot.sendMessage(cid, "❌ Erreur de démarrage. Réessaie.");
       }
     }
-    const secs = parseInt(db.getSetting("bot_wait_seconds", "30"));
-    const label = task.type === "miniapp" ? "Mini App" : "Bot";
-    const action = task.type === "miniapp" ? "Ouvre et utilise la Mini App" : "Ouvre le bot et clique /start";
+
+    const label  = task.type === "miniapp" ? "Mini App" : "Bot";
+    setState(uid, "task_forward_proof", { taskId, targetUsername });
     return bot.sendMessage(cid,
-      `▶️ <b>Démarre la ${label}</b>\n\n` +
+      `▶️ <b>Prouve ta visite — ${esc(label)}</b>\n\n` +
       `📌 ${esc(task.title)}\n` +
       `💰 Récompense : <b>${fmt(task.reward)}</b>\n\n` +
-      `1️⃣ ${action}\n` +
-      `2️⃣ Reviens ici dans <b>${secs}s</b>\n` +
-      `3️⃣ Clique "Valider"`,
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `1️⃣ Ouvre le ${label.toLowerCase()} via le bouton ci-dessous\n` +
+      `2️⃣ Envoie <code>/start</code> au bot\n` +
+      `3️⃣ <b>Transfère-nous son message de réponse</b>\n\n` +
+      `⚠️ Le message doit dater de moins de <b>5 minutes</b>.`,
       { parse_mode: "HTML", reply_markup: KBI([
         [{ text: `🔗 Ouvrir`, url: task.link }],
-        [{ text: `✅ Valider (après ${secs}s)`, callback_data: `verify_task_${taskId}` }]
+        [{ text: "❌ Annuler", callback_data: "go_home" }]
       ]) });
   }
 
@@ -1203,23 +1208,17 @@ async function handleVerifyTask(cid, uid, taskId, user) {
     }
   }
 
-  // Vérif délai pour bot ou miniapp
+  // Bot/miniapp : la validation se fait par message transféré, pas par ce bouton
   if (task.type === "bot" || task.type === "miniapp") {
-    // Utiliser must_stay_until si dispo, sinon calculer depuis started_at
-    let remainingSec = 0;
-    if (existing.must_stay_until) {
-      remainingSec = Math.ceil((new Date(existing.must_stay_until).getTime() - Date.now()) / 1000);
-    } else {
-      const secs = parseInt(db.getSetting("bot_wait_seconds", "30"));
-      const startedAt = new Date(existing.completed_at).getTime();
-      const elapsed = (Date.now() - startedAt) / 1000;
-      remainingSec = Math.ceil(secs - elapsed);
-    }
-    if (remainingSec > 0) {
-      return bot.sendMessage(cid,
-        `⏳ <b>Attends encore ${remainingSec}s !</b>`,
-        { parse_mode: "HTML" });
-    }
+    let targetUsername = (task.link || "").trim()
+      .replace(/https?:\/\/t\.me\//i, "")
+      .replace(/^@/, "")
+      .split("/")[0].split("?")[0];
+    setState(uid, "task_forward_proof", { taskId, targetUsername });
+    return bot.sendMessage(cid,
+      `📩 <b>Preuve requise</b>\n\n` +
+      `Transfère un message récent de @${esc(targetUsername)} pour valider cette tâche.`,
+      { parse_mode: "HTML" });
   }
 
   // Tout OK — créditer
@@ -2003,6 +2002,65 @@ bot.on("message", async (msg) => {
   user = db.getUser(uid);
 
   const st = getState(uid);
+
+  // ─── Vérification de visite bot/miniapp (message transféré) ───
+  if (st && st.state === "task_forward_proof") {
+    const { taskId, targetUsername } = st.data;
+
+    if (!msg.forward_from && !msg.forward_from_chat) {
+      return bot.sendMessage(cid,
+        `❌ <b>Transfère</b> un message du bot, ne l'écris pas.\n\n` +
+        `Ouvre @${esc(targetUsername)}, envoie <code>/start</code>, puis <b>transfère</b> son message de réponse ici.`,
+        { parse_mode: "HTML" });
+    }
+
+    // Récupérer l'objet source (bot → forward_from, canal → forward_from_chat)
+    const fwd = msg.forward_from || msg.forward_from_chat;
+
+    // Doit être un bot (pas un humain, pas un canal)
+    if (!fwd.is_bot && msg.forward_from) {
+      return bot.sendMessage(cid, `❌ Le message transféré n'est pas d'un bot.`);
+    }
+
+    // Vérifier le bon username
+    const fwdUsername = (fwd.username || "").toLowerCase();
+    if (fwdUsername !== targetUsername.toLowerCase()) {
+      return bot.sendMessage(cid,
+        `❌ <b>Mauvais bot !</b>\n\nTransfère un message de <b>@${esc(targetUsername)}</b>, pas de @${esc(fwd.username || "?")}.`,
+        { parse_mode: "HTML" });
+    }
+
+    // Vérifier que le message est récent (< 5 minutes)
+    const fwdAge = Math.floor(Date.now() / 1000) - (msg.forward_date || 0);
+    if (fwdAge > 300) {
+      const mins = Math.floor(fwdAge / 60);
+      return bot.sendMessage(cid,
+        `⏱ <b>Message trop ancien</b> (${mins} min).\n\nRouvre @${esc(targetUsername)}, envoie <code>/start</code> et transfère immédiatement son message.`,
+        { parse_mode: "HTML" });
+    }
+
+    // ✅ Tout bon — valider et créditer
+    clearState(uid);
+    const r = db.verifyTaskCompletion(taskId, uid, true);
+    if (r && r.success) {
+      const nuAfter = db.getUser(uid);
+      let successMsg = `✅ <b>Tâche validée !</b>\n\n💰 +<b>${fmt(r.reward)}</b> crédité !\n💵 Gains : <b>${fmt(nuAfter.balance)}</b>`;
+      if (r.levelUp && r.levelUp.leveledUp) {
+        successMsg += `\n\n🎉 <b>NIVEAU ${r.levelUp.newLevel} ATTEINT !</b>`;
+        if (r.levelUp.reward > 0) successMsg += `\n🎁 Bonus : +<b>${fmt(r.levelUp.reward)}</b>`;
+      }
+      if (r.taskCompleted && r.task) {
+        const creatorId = r.task.creator_id;
+        if (creatorId && creatorId !== uid) {
+          bot.sendMessage(creatorId,
+            `📢 <b>Campagne terminée !</b>\n\n📋 <b>${esc(r.task.title)}</b>\n✅ Toutes les places complétées.`,
+            { parse_mode: "HTML" }).catch(() => {});
+        }
+      }
+      return bot.sendMessage(cid, successMsg, { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    }
+    return bot.sendMessage(cid, "❌ Validation impossible. La tâche est peut-être expirée.", { reply_markup: KB_MAIN(uid) });
+  }
 
   // ─── Gestion photos pour preuves ───
   if (msg.photo && st && st.state === "task_proof") {

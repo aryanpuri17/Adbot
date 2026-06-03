@@ -321,7 +321,6 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
       `Gagne de l'argent réel en crypto — directement sur Telegram.\n\n` +
       `✅ <b>Tâches</b> — rejoins des canaux, gagne à chaque fois\n` +
       `👥 <b>Parrainage</b> — ${fmt(refBonus)} par ami invité\n` +
-      `🎁 <b>Bonus quotidien</b> — connexion = argent\n\n` +
       `💸 Paiements en TON · BNB · USDT`
     );
     await bot.sendMessage(cid,
@@ -374,7 +373,17 @@ bot.on("callback_query", async (q) => {
           `📢 <b>Dernière étape !</b>\n\nRejoins nos canaux officiels pour accéder à <b>${esc(botName2)}</b> :`,
           { parse_mode: "HTML", reply_markup: channelJoinButtons() });
       }
-      return sendHome(cid, db.getUser(uid));
+      const newUser = db.getUser(uid);
+      sendHome(cid, newUser);
+      // Montrer le code parrainage une seule fois, juste après la première vérification
+      const refBonusAmt = parseFloat(db.getSetting("referral_bonus", config.REFERRAL_BONUS));
+      if (newUser.referral_code) {
+        bot.sendMessage(cid,
+          `🔗 <b>Ton code parrainage personnel :</b>\n\n<code>${newUser.referral_code}</code>\n\n` +
+          `Partage-le à tes amis et gagne <b>${fmt(refBonusAmt)}</b> à chaque inscription !`,
+          { parse_mode: "HTML" }).catch(() => {});
+      }
+      return;
     } else {
       st.data.attempts = (st.data.attempts || 0) + 1;
       if (st.data.attempts >= 3) {
@@ -1063,8 +1072,10 @@ async function showTasksByType(cid, uid, type, user) {
   const typeLabel = typeNames[type] || "📋";
 
   if (!tasks || tasks.length === 0) {
+    const doneToday = (db.getUser(uid) || {}).daily_tasks_done || 0;
+    const todayTxt = doneToday > 0 ? `\n\n✅ Tu as déjà fait <b>${doneToday}/${maxT}</b> tâches aujourd'hui.` : "";
     return bot.sendMessage(cid,
-      `${typeLabel}\n\n📭 Aucune tâche disponible.\n\nReviens plus tard !`,
+      `${typeLabel}\n\n📭 Aucune tâche disponible pour le moment.${todayTxt}\n\n🔔 Reviens demain ou consulte les autres catégories !`,
       { parse_mode: "HTML" });
   }
 

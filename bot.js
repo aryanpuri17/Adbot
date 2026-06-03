@@ -136,16 +136,12 @@ function currencySymbol(cur) {
 }
 
 function fmt(amountUSD) {
-  // Devise interne TOUJOURS en USD
-  // Affichage : 4 décimales si < 0.01, sinon 2 décimales
   const n = Number(amountUSD || 0);
-  if (n === 0) return "0.00$";
-  if (Math.abs(n) < 0.01) return `${n.toFixed(4)}$`;
-  return `${n.toFixed(2)}$`;
+  return `${n.toFixed(4)}$`;
 }
 
 function fmtUSD(amount) {
-  return `${Number(amount || 0).toFixed(2)}$`;
+  return `${Number(amount || 0).toFixed(4)}$`;
 }
 
 function esc(t) {
@@ -186,7 +182,7 @@ function KBI(rows) { return { inline_keyboard: rows }; }
 
 function KB_MAIN(uid) {
   const rows = [
-    ["💰 Gains",     "📋 Tâches"],
+    ["💰 Solde",     "📋 Tâches"],
     ["🏆 Concours",  "🎁 Bonus du jour"],
     ["👥 Parrainer", "👤 Profil"],
     ["💬 Support"],
@@ -586,6 +582,78 @@ bot.on("callback_query", async (q) => {
       { parse_mode: "HTML", reply_markup: KB_CANCEL });
   }
 
+  // ─── Gestion campagnes utilisateur ───
+  if (data === "back_to_campaigns") {
+    return showMyCampaigns(cid, uid);
+  }
+  if (data === "ct_new") {
+    return showCreateCampaign(cid, user);
+  }
+  if (data.startsWith("camp_manage_")) {
+    const taskId = parseInt(data.replace("camp_manage_",""));
+    return showCampaignDetail(cid, uid, taskId);
+  }
+  if (data.startsWith("camp_pause_")) {
+    const taskId = parseInt(data.replace("camp_pause_",""));
+    const t = db.getTask(taskId);
+    if (!t || t.creator_id !== uid || t.status !== "active") return bot.answerCallbackQuery(q.id, { text: "❌ Impossible." });
+    db.updateTaskStatus(taskId, "paused");
+    return showCampaignDetail(cid, uid, taskId);
+  }
+  if (data.startsWith("camp_resume_")) {
+    const taskId = parseInt(data.replace("camp_resume_",""));
+    const t = db.getTask(taskId);
+    if (!t || t.creator_id !== uid) return bot.answerCallbackQuery(q.id, { text: "❌ Impossible." });
+    if (t.status !== "paused") return bot.answerCallbackQuery(q.id, { text: "❌ Campagne non en pause." });
+    if ((t.budget_remaining || 0) <= 0) return bot.answerCallbackQuery(q.id, { text: "❌ Budget épuisé. Ajoute du budget d'abord." });
+    db.updateTaskStatus(taskId, "active");
+    return showCampaignDetail(cid, uid, taskId);
+  }
+  if (data.startsWith("camp_budget_")) {
+    const taskId = parseInt(data.replace("camp_budget_",""));
+    const t = db.getTask(taskId);
+    if (!t || t.creator_id !== uid) return bot.answerCallbackQuery(q.id, { text: "❌ Introuvable." });
+    setState(uid, "camp_add_budget", { taskId });
+    const userNow = db.getUser(uid);
+    const avail = (userNow.balance || 0) + (userNow.deposit_balance || 0);
+    return bot.sendMessage(cid,
+      `➕ <b>Ajouter du budget</b>\n\n` +
+      `📋 Campagne : <b>${esc(t.title)}</b>\n` +
+      `💰 Budget actuel : <b>${fmt(t.budget_remaining)}</b>\n` +
+      `💳 Ton solde : <b>${fmt(avail)}</b>\n` +
+      `💵 Récompense/user : <b>${fmt(t.reward)}</b>\n\n` +
+      `Combien veux-tu ajouter ?`,
+      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+  }
+  if (data.startsWith("camp_delete_")) {
+    const taskId = parseInt(data.replace("camp_delete_",""));
+    const t = db.getTask(taskId);
+    if (!t || t.creator_id !== uid || t.status === "deleted") return bot.answerCallbackQuery(q.id, { text: "❌ Introuvable." });
+    setState(uid, "camp_confirm_delete", { taskId, title: t.title, refund: t.budget_remaining || 0 });
+    return bot.sendMessage(cid,
+      `🗑️ <b>Supprimer la campagne ?</b>\n\n` +
+      `📋 <b>${esc(t.title)}</b>\n` +
+      `💰 Remboursement : <b>${fmt(t.budget_remaining || 0)}</b>\n\n` +
+      `Cette action est irréversible.`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "✅ Oui, supprimer", callback_data: `camp_delete_confirm_${taskId}` },
+         { text: "❌ Annuler",        callback_data: `camp_manage_${taskId}` }]
+      ]) });
+  }
+  if (data.startsWith("camp_delete_confirm_")) {
+    const taskId = parseInt(data.replace("camp_delete_confirm_",""));
+    const t = db.getTask(taskId);
+    if (!t || t.creator_id !== uid) return;
+    clearState(uid);
+    const refund = t.budget_remaining || 0;
+    db.updateTaskStatus(taskId, "deleted");
+    if (refund > 0) creditDeposit(uid, refund);
+    return bot.sendMessage(cid,
+      `✅ <b>Campagne supprimée.</b>\n\n` +
+      `${refund > 0 ? `💰 <b>${fmt(refund)}</b> remboursé dans ton solde campagnes.` : "Aucun budget restant à rembourser."}`,
+      { parse_mode: "HTML", reply_markup: KB_TASKS });
+  }
+
   // ─── ADMIN ───
   if (!isAdmin(uid)) return;
 
@@ -795,8 +863,7 @@ function sendHome(cid, user) {
   const botName = db.getSetting("bot_name", "ADCRYPTON");
   const maxT    = db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY);
 
-  const earnedBal = user.balance || 0;
-  const depBal    = user.deposit_balance || 0;
+  const solde     = (user.balance || 0) + (user.deposit_balance || 0);
   const streak    = user.daily_streak || 0;
   const lastBonus = user.last_daily_bonus ? new Date(user.last_daily_bonus) : null;
   const bonusReady = !lastBonus || new Date().toDateString() !== lastBonus.toDateString();
@@ -808,8 +875,7 @@ function sendHome(cid, user) {
   bot.sendMessage(cid,
     `🏠 <b>${esc(botName)}</b>\n\n` +
     `👋 Salut <b>${esc(user.first_name)}</b> !\n\n` +
-    `💰 Gains : <b>${fmt(earnedBal)}</b>\n` +
-    `💳 Dépôt : <b>${fmt(depBal)}</b>\n\n` +
+    `💰 Solde : <b>${fmt(solde)}</b>\n\n` +
     `📋 Tâches aujourd'hui : <b>${user.daily_tasks_done}/${maxT}</b>\n` +
     `👥 Filleuls : <b>${user.referral_count}</b>` +
     streakTxt + bonusTxt + extraTxt,
@@ -1043,18 +1109,19 @@ async function handleVerifyTask(cid, uid, taskId, user) {
 
 function showBalance(cid, user) {
   user = db.getUser(user.user_id);
-  const earned = user.balance || 0;
+  const earned  = user.balance || 0;
   const deposit = user.deposit_balance || 0;
+  const total   = earned + deposit;
+  const minW    = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
   bot.sendMessage(cid,
-    `💳 <b>MA BALANCE</b>\n\n` +
-    `💰 Gains (retirable)\n` +
-    `   <b>${fmt(earned)}</b>\n\n` +
-    `💳 Dépôt (campagnes/jeux)\n` +
-    `   <b>${fmt(deposit)}</b>\n\n` +
+    `💰 <b>MON SOLDE</b>\n\n` +
+    `💰 Solde total : <b>${fmt(total)}</b>\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `📊 Total : <b>${fmt(earned + deposit)}</b>\n` +
-    `📥 Déposé : ${fmt(user.total_deposited)} · 📤 Retiré : ${fmt(user.total_withdrawn)}\n\n` +
-    `ℹ️ Les fonds déposés ne sont pas retirables.`,
+    `🏧 Retirable (tâches) : <b>${fmt(earned)}</b>\n` +
+    `💳 Campagnes : <b>${fmt(deposit)}</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📥 Déposé : ${fmt(user.total_deposited)} · 📤 Retiré : ${fmt(user.total_withdrawn)}\n` +
+    `📌 Min retrait : ${fmt(minW)}`,
     { parse_mode: "HTML", reply_markup: KB_BALANCE });
 }
 
@@ -1414,14 +1481,48 @@ function showMyCampaigns(cid, uid) {
     txt += "Aucune campagne créée.\n\n💡 Crée ta première campagne via ➕ Créer Campagne !";
     return bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB_TASKS });
   }
-  const statusEmoji = { pending:"⏳", active:"✅", completed:"🏁", rejected:"❌", paused:"⏸" };
-  tasks.slice(0, 10).forEach(t => {
+  const statusEmoji = { pending:"⏳", active:"✅", completed:"🏁", rejected:"❌", paused:"⏸", deleted:"🗑" };
+  const visible = tasks.filter(t => t.status !== "deleted").slice(0, 10);
+  const rows = [];
+  visible.forEach(t => {
     const emoji = statusEmoji[t.status] || "❓";
     const pct = t.max_completions > 0 ? Math.round((t.current_completions / t.max_completions) * 100) : 0;
     txt += `${emoji} <b>${esc(t.title)}</b>\n` +
-           `   📊 ${t.current_completions}/${t.max_completions} (${pct}%) | 💰 ${fmt(t.budget_remaining)}\n\n`;
+           `   📊 ${t.current_completions}/${t.max_completions} (${pct}%) · 💰 ${fmt(t.budget_remaining)} restant\n\n`;
+    rows.push([{ text: `⚙️ Gérer — ${esc(t.title).slice(0,25)}`, callback_data: `camp_manage_${t.task_id}` }]);
   });
-  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB_TASKS });
+  rows.push([{ text: "➕ Nouvelle campagne", callback_data: "ct_new" }]);
+  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KBI(rows) });
+}
+
+function showCampaignDetail(cid, uid, taskId) {
+  const t = db.getTask(taskId);
+  if (!t || t.creator_id !== uid) return bot.sendMessage(cid, "❌ Campagne introuvable.");
+  const statusLabel = { pending:"⏳ En attente", active:"✅ Active", completed:"🏁 Terminée", rejected:"❌ Rejetée", paused:"⏸ En pause" };
+  const pct = t.max_completions > 0 ? Math.round((t.current_completions / t.max_completions) * 100) : 0;
+  let txt =
+    `📋 <b>${esc(t.title)}</b>\n` +
+    `🔗 ${esc(t.link)}\n\n` +
+    `📊 Progression : <b>${t.current_completions}/${t.max_completions}</b> (${pct}%)\n` +
+    `💰 Budget restant : <b>${fmt(t.budget_remaining)}</b>\n` +
+    `💵 Récompense/user : <b>${fmt(t.reward)}</b>\n` +
+    `📌 Statut : <b>${statusLabel[t.status] || t.status}</b>`;
+
+  const rows = [];
+  if (t.status === "active") {
+    rows.push([{ text: "⏸ Mettre en pause", callback_data: `camp_pause_${taskId}` }]);
+  }
+  if (t.status === "paused") {
+    rows.push([{ text: "▶️ Reprendre", callback_data: `camp_resume_${taskId}` }]);
+  }
+  if (t.status === "active" || t.status === "paused" || t.status === "completed") {
+    rows.push([{ text: "➕ Ajouter du budget", callback_data: `camp_budget_${taskId}` }]);
+  }
+  if (t.status !== "deleted") {
+    rows.push([{ text: "🗑️ Supprimer (remboursement)", callback_data: `camp_delete_${taskId}` }]);
+  }
+  rows.push([{ text: "◀️ Retour", callback_data: "back_to_campaigns" }]);
+  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KBI(rows) });
 }
 
 function showTransactions(cid, uid) {
@@ -1865,6 +1966,7 @@ bot.on("message", async (msg) => {
   }
 
   // ─── Navigation principale ───
+  if (text === "💰 Solde")       { clearState(uid); return showBalance(cid, user); }
   if (text === "💰 Gains")       { clearState(uid); return showBalance(cid, user); }
   if (text === "💳 Balance")     { clearState(uid); return showBalance(cid, user); }
   if (text === "📋 Tâches")      { clearState(uid); return showTasksMenu(cid, user); }
@@ -2176,6 +2278,55 @@ bot.on("message", async (msg) => {
         ]]) }).catch(() => {});
     }
     return;
+  }
+
+  // Ajout de budget à une campagne existante
+  if (s === "camp_add_budget") {
+    const amount = parseFloat(text);
+    const taskId = data.taskId;
+    if (isNaN(amount) || amount <= 0) {
+      return bot.sendMessage(cid, "❌ Montant invalide. Envoie un nombre positif :", { reply_markup: KB_CANCEL });
+    }
+    const t = db.getTask(taskId);
+    if (!t || t.creator_id !== uid) {
+      clearState(uid);
+      return bot.sendMessage(cid, "❌ Campagne introuvable.", { reply_markup: KB_MAIN(uid) });
+    }
+    user = db.getUser(uid);
+    const totalBalance = (user.balance || 0) + (user.deposit_balance || 0);
+    if (amount > totalBalance) {
+      return bot.sendMessage(cid,
+        `❌ Solde insuffisant.\n💰 Ton solde : <b>${fmt(totalBalance)}</b>`,
+        { parse_mode: "HTML", reply_markup: KB_CANCEL });
+    }
+    const feePercent = parseFloat(db.getSetting("task_fee_percent", "20"));
+    const totalPerUser = t.reward * (1 + feePercent / 100);
+    const addedSlots = Math.floor(amount / totalPerUser);
+    if (addedSlots < 1) {
+      return bot.sendMessage(cid,
+        `❌ Budget insuffisant pour au moins 1 participant.\nMinimum : <b>${fmt(totalPerUser)}</b>`,
+        { parse_mode: "HTML", reply_markup: KB_CANCEL });
+    }
+    const realAmount = Math.round(addedSlots * totalPerUser * 10000) / 10000;
+    const ok = debitSmart(uid, realAmount, "task_budget_add", `Budget campagne: ${t.title}`);
+    if (!ok) {
+      return bot.sendMessage(cid, "❌ Solde insuffisant.", { reply_markup: KB_CANCEL });
+    }
+    const newBudgetRemaining = Math.round(((t.budget_remaining || 0) + realAmount) * 10000) / 10000;
+    const newMaxCompletions = (t.max_completions || 0) + addedSlots;
+    const newStatus = (t.status === "completed" || t.status === "paused") ? "active" : t.status;
+    db.db.prepare("UPDATE tasks SET budget_remaining=?, max_completions=?, status=? WHERE task_id=?")
+      .run(newBudgetRemaining, newMaxCompletions, newStatus, taskId);
+    clearState(uid);
+    return bot.sendMessage(cid,
+      `✅ <b>Budget ajouté !</b>\n\n` +
+      `📌 ${esc(t.title)}\n` +
+      `➕ <b>${fmt(realAmount)}</b> ajouté\n` +
+      `🎯 +${addedSlots} participants supplémentaires\n` +
+      `💰 Budget restant : <b>${fmt(newBudgetRemaining)}</b>\n` +
+      `👥 Max total : <b>${newMaxCompletions}</b>\n` +
+      `${newStatus === "active" && t.status !== "active" ? "▶️ Campagne <b>réactivée</b> !" : ""}`,
+      { parse_mode: "HTML", reply_markup: KB_TASKS });
   }
 
   // Admin — broadcast

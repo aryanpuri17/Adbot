@@ -1106,6 +1106,16 @@ async function handleStartTask(cid, uid, taskId, user) {
   const task = db.getTask(taskId);
   if (!task || task.status !== "active") return bot.sendMessage(cid, "❌ Tâche indisponible.");
 
+  // Vérifier la limite quotidienne (contournable via lien direct sans ce check)
+  db.resetDailyTasksIfNeeded(uid);
+  const freshUser = db.getUser(uid);
+  const maxT = parseInt(db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY));
+  if ((freshUser.daily_tasks_done || 0) >= maxT) {
+    return bot.sendMessage(cid,
+      `⏰ <b>Limite atteinte</b>\n\nTu as fait ${maxT}/${maxT} tâches aujourd'hui.\nReviens demain !`,
+      { parse_mode: "HTML" });
+  }
+
   // Vérif déjà complété
   const existing = db.db.prepare("SELECT * FROM task_completions WHERE task_id=? AND user_id=?").get(taskId, uid);
   if (existing && existing.status === "verified") {
@@ -2315,8 +2325,14 @@ bot.on("message", async (msg) => {
   }
   // Retrait — adresse wallet
   if (s === "wd_wallet") {
+    const wallet = text.trim();
+    if (!wallet || wallet.length < 10 || wallet.includes(" ")) {
+      return bot.sendMessage(cid,
+        `❌ Adresse wallet invalide.\n\nVérifie l'adresse et renvoie-la :`,
+        { reply_markup: KB_CANCEL });
+    }
     const { method, amount, fee: feeAmt, netAmount } = data;
-    setState(uid, "wd_pending_confirm", { method, amount, wallet: text, fee: feeAmt, netAmount });
+    setState(uid, "wd_pending_confirm", { method, amount, wallet, fee: feeAmt, netAmount });
     return bot.sendMessage(cid,
       `🏧 <b>Résumé du retrait</b>\n\n` +
       `💵 Montant : <b>${fmt(amount)}</b>\n` +
@@ -2677,14 +2693,24 @@ bot.on("message", async (msg) => {
   // Support
   if (s === "support_msg") {
     clearState(uid);
-    db.createTicket(uid, "Support", text);
+    // Limiter à 1 ticket ouvert à la fois pour éviter le spam
+    const openCount = db.db.prepare("SELECT COUNT(*) as c FROM tickets WHERE user_id = ? AND status = 'open'").get(uid);
+    if ((openCount?.c || 0) >= 1) {
+      return bot.sendMessage(cid,
+        `⚠️ <b>Tu as déjà un ticket ouvert.</b>\n\nAttends qu'un admin réponde avant d'en créer un nouveau.`,
+        { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    }
+    const ticketId = db.createTicket(uid, "Support", text);
     bot.sendMessage(cid,
       `✅ <b>Message envoyé !</b>\n\nNous te répondrons dans les plus brefs délais.\nTu recevras une notification ici dès qu'un admin répond.`,
       { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
     for (const aid of config.ADMIN_IDS) {
       bot.sendMessage(aid,
-        `🎫 <b>Nouveau ticket #support</b>\n\n👤 ${esc(user.first_name)} · ID : <code>${uid}</code>\n\n💬 ${esc(text)}`,
-        { parse_mode: "HTML" }).catch(() => {});
+        `🎫 <b>Nouveau ticket #${ticketId}</b>\n\n👤 ${esc(user.first_name)} · ID : <code>${uid}</code>\n\n💬 ${esc(text)}`,
+        { parse_mode: "HTML", reply_markup: KBI([[
+          { text: "💬 Répondre", callback_data: `reply_ticket_${ticketId}` },
+          { text: "✅ Fermer",   callback_data: `close_ticket_${ticketId}` }
+        ]]) }).catch(() => {});
     }
     return;
   }

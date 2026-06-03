@@ -944,68 +944,6 @@ function claimDailyBonus(userId) {
   return { success: true, amount: bonus, streak: newStreak, multiplier };
 }
 
-function spinWheel(userId, free = false) {
-  const user = getUser(userId);
-  if (!user) return null;
-
-  const spinCost = parseFloat(getSetting("spin_cost", config.SPIN_WHEEL.cost));
-
-  if (free) {
-    if (user.free_spins <= 0) return { success: false, reason: "no_free_spins" };
-    db.prepare("UPDATE users SET free_spins = free_spins - 1 WHERE user_id = ?").run(userId);
-  } else {
-    if (user.balance < spinCost) return { success: false, reason: "insufficient_balance" };
-    updateBalance(userId, -spinCost, "spin_wheel", "Roue de la fortune");
-  }
-
-  // Déterminer le gain
-  const prizes = config.SPIN_WHEEL.prizes;
-  const totalChance = prizes.reduce((sum, p) => sum + p.chance, 0);
-  let random = Math.random() * totalChance;
-  let prize = prizes[prizes.length - 1];
-
-  for (const p of prizes) {
-    random -= p.chance;
-    if (random <= 0) {
-      prize = p;
-      break;
-    }
-  }
-
-  if (prize.value > 0) {
-    updateBalance(userId, prize.value, "spin_win", `Roue: ${prize.label}`);
-  }
-
-  recordGame(userId, "spin_wheel", free ? 0 : spinCost, prize.value, prize.label);
-  db.prepare("UPDATE users SET last_spin = CURRENT_TIMESTAMP WHERE user_id = ?").run(userId);
-
-  return { success: true, prize };
-}
-
-// ============================================
-// 💎 FONCTIONS VIP
-// ============================================
-
-function purchaseVIP(userId, level) {
-  const user = getUser(userId);
-  if (!user) return null;
-
-  const vipLevel = config.VIP_LEVELS[level];
-  if (!vipLevel || !vipLevel.price) return { success: false, reason: "invalid_level" };
-
-  if (user.balance < vipLevel.price) return { success: false, reason: "insufficient_balance" };
-
-  updateBalance(userId, -vipLevel.price, "vip_purchase", `VIP ${vipLevel.name}`);
-  
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
-  db.prepare("UPDATE users SET vip_level = ?, vip_expires_at = ?, total_spent = total_spent + ? WHERE user_id = ?").run(level, expiresAt, vipLevel.price, userId);
-  
-  db.prepare("INSERT INTO vip_purchases (user_id, vip_level, amount, expires_at) VALUES (?, ?, ?, ?)").run(userId, level, vipLevel.price, expiresAt);
-
-  addXP(userId, vipLevel.price * config.XP_PER_DOLLAR_SPENT);
-
-  return { success: true, level: vipLevel };
-}
 
 // ============================================
 // 🎫 FONCTIONS TICKETS
@@ -1173,7 +1111,7 @@ function resetDailyTasksIfNeeded(userId) {
   if (!user) return;
   const today = new Date().toISOString().split("T")[0];
   if (user.daily_tasks_reset !== today) {
-    const dailySpins = parseInt(getSetting("daily_free_spins", config.SPIN_WHEEL.daily_free_spins || 1));
+    const dailySpins = parseInt(getSetting("daily_free_spins", 1));
     db.prepare("UPDATE users SET daily_tasks_done = 0, daily_tasks_reset = ?, free_spins = ? WHERE user_id = ?")
       .run(today, dailySpins, userId);
   }
@@ -1205,12 +1143,12 @@ module.exports = {
   // Giveaways
   createGiveaway, getGiveaway, getActiveGiveaways, enterGiveaway,
   drawGiveaway, getGiveawayEntries,
-  // Games
-  recordGame, getUserGameHistory, claimDailyBonus, spinWheel,
+  // Games history (kept for transaction display)
+  recordGame, getUserGameHistory,
+  // Daily bonus
+  claimDailyBonus,
   // Users extra
   getUserReferrals, resetDailyTasksIfNeeded,
-  // VIP
-  purchaseVIP,
   // Tickets
   createTicket, getTicket, getOpenTickets, getUserTickets,
   respondToTicket, closeTicket,

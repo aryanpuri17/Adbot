@@ -24,7 +24,6 @@ setInterval(() => {
   for (const k in states) if (now - states[k].ts > 30 * 60 * 1000) delete states[k];
 }, 10 * 60 * 1000);
 
-const ADMIN_UID = config.ADMIN_IDS[0];
 let botInfo = null;
 
 // ─────────────────────────────────────────────
@@ -54,7 +53,7 @@ function getTotalBalance(uid) {
 }
 
 // Débite intelligent : d'abord du dépôt, puis de la balance retirable
-// Utilisé pour jeux et création de campagnes
+// Utilisé pour création de campagnes et achat VIP
 function debitSmart(uid, amount, type, description) {
   const u = db.getUser(uid);
   if (!u) return false;
@@ -449,13 +448,17 @@ bot.on("callback_query", async (q) => {
     const vipNames3 = { 1: "🥉 Bronze", 2: "🥈 Silver", 3: "🥇 Gold", 4: "💎 Diamond" };
     const defConf3  = config.VIP_LEVELS[vipLvl2] || {};
     const price3    = parseFloat(db.getSetting(`vip_${vipLvl2}_price`, defConf3.price || 0));
-    const ok = db.debitSmart(uid, price3, "vip_purchase", `Achat VIP ${vipNames3[vipLvl2]}`);
+    const ok = debitSmart(uid, price3, "vip_purchase", `Achat VIP ${vipNames3[vipLvl2]}`);
     if (!ok) {
       return bot.sendMessage(cid,
         `❌ Solde insuffisant.\n\n💰 Requis : <b>${fmt(price3)}</b>\n\nDépose des fonds pour acheter le VIP.`,
         { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
     }
-    db.db.prepare("UPDATE users SET vip_level = ? WHERE user_id = ?").run(vipLvl2, uid);
+    const vipExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    db.db.prepare("UPDATE users SET vip_level = ?, vip_expires_at = ?, total_spent = total_spent + ? WHERE user_id = ?")
+      .run(vipLvl2, vipExpiresAt, price3, uid);
+    db.db.prepare("INSERT INTO vip_purchases (user_id, vip_level, amount, expires_at) VALUES (?,?,?,?)")
+      .run(uid, vipLvl2, price3, vipExpiresAt);
     return bot.sendMessage(cid,
       `🎉 <b>Félicitations !</b>\n\nTu es maintenant <b>${vipNames3[vipLvl2]}</b> !\n\n` +
       `✅ Avantages activés immédiatement.`,
@@ -465,11 +468,6 @@ bot.on("callback_query", async (q) => {
     clearState(uid);
     return bot.editMessageText("❌ Achat VIP annulé.", { chat_id: cid, message_id: mid }).catch(() =>
       bot.sendMessage(cid, "❌ Achat VIP annulé.", { reply_markup: KB_MAIN(uid) }));
-  }
-  if (data === "go_home") {
-    clearState(uid);
-    user = db.getUser(uid);
-    return sendHome(cid, user);
   }
 
   // ─── Dépôts ───
@@ -1024,9 +1022,9 @@ async function handleVerifyTask(cid, uid, taskId, user) {
     }
     // Notifier le créateur si la campagne vient de se terminer
     if (r.taskCompleted && r.task) {
-      const creator = db.getUser(r.task.created_by);
-      if (creator) {
-        bot.sendMessage(r.task.created_by,
+      const creatorId = r.task.creator_id;
+      if (creatorId && creatorId !== uid) {
+        bot.sendMessage(creatorId,
           `📢 <b>Campagne terminée !</b>\n\n` +
           `📋 <b>${esc(r.task.title)}</b>\n` +
           `✅ Toutes les places ont été complétées.\n` +

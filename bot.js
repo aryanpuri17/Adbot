@@ -849,9 +849,20 @@ bot.on("callback_query", async (q) => {
     const comp = db.db.prepare("SELECT * FROM task_completions WHERE completion_id=?").get(cmpId);
     if (comp) {
       const r = db.verifyTaskCompletion(comp.task_id, comp.user_id, true);
-      if (r.success) bot.sendMessage(comp.user_id,
-        `✅ <b>Preuve validée !</b>\n\n💰 +<b>${fmt(r.reward)}</b> crédité dans tes gains.\n\nMerci pour ta participation !`,
-        { parse_mode: "HTML" }).catch(() => {});
+      if (r.success) {
+        bot.sendMessage(comp.user_id,
+          `✅ <b>Preuve validée !</b>\n\n💰 +<b>${fmt(r.reward)}</b> crédité dans tes gains.\n\nMerci pour ta participation !`,
+          { parse_mode: "HTML" }).catch(() => {});
+        return bot.editMessageCaption((q.message.caption || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid }).catch(() => {
+          bot.editMessageText((q.message.text || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid }).catch(() => {});
+        });
+      } else {
+        const reason = r.reason === "budget_exhausted" ? "budget épuisé" : r.reason;
+        bot.answerCallbackQuery(q.id, { text: `⚠️ Impossible d'approuver : ${reason}`, show_alert: true }).catch(() => {});
+        return bot.editMessageCaption((q.message.caption || "") + `\n\n⚠️ NON CRÉDITÉ (${reason})`, { chat_id: cid, message_id: mid }).catch(() => {
+          bot.editMessageText((q.message.text || "") + `\n\n⚠️ NON CRÉDITÉ (${reason})`, { chat_id: cid, message_id: mid }).catch(() => {});
+        });
+      }
     }
     return bot.editMessageCaption((q.message.caption || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid }).catch(() => {
       bot.editMessageText((q.message.text || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid }).catch(() => {});
@@ -1278,7 +1289,12 @@ async function handleVerifyTask(cid, uid, taskId, user) {
     }
     return bot.sendMessage(cid, msg, { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
   }
-  return bot.sendMessage(cid, "❌ Validation impossible.");
+  if (r.reason === "budget_exhausted") {
+    return bot.sendMessage(cid,
+      "⚠️ <b>Cette tâche vient d'être complétée par d'autres utilisateurs.</b>\n\nLe budget est épuisé — tu n'es pas récompensé.",
+      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+  }
+  return bot.sendMessage(cid, "❌ Validation impossible.", { reply_markup: KB_MAIN(uid) });
 }
 
 // ─────────────────────────────────────────────
@@ -2155,6 +2171,11 @@ bot.on("message", async (msg) => {
       }
       return bot.sendMessage(cid, successMsg, { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
     }
+    if (r && r.reason === "budget_exhausted") {
+      return bot.sendMessage(cid,
+        "⚠️ <b>Cette tâche vient d'être complétée par d'autres utilisateurs.</b>\n\nLe budget est épuisé — tu n'es pas récompensé.",
+        { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    }
     return bot.sendMessage(cid, "❌ Validation impossible. La tâche est peut-être expirée.", { reply_markup: KB_MAIN(uid) });
   }
 
@@ -2519,15 +2540,20 @@ bot.on("message", async (msg) => {
         { parse_mode: "HTML", reply_markup: KB_CANCEL });
     }
     const realAmount = Math.round(addedSlots * totalPerUser * 10000) / 10000;
-    const ok = debitSmart(uid, realAmount, "task_budget_add", `Budget campagne: ${t.title}`);
-    if (!ok) {
+    const newStatus = (t.status === "completed" || t.status === "paused") ? "active" : t.status;
+    const addOk = db.db.transaction(() => {
+      if (!debitSmart(uid, realAmount, "task_budget_add", `Budget campagne: ${t.title}`)) return false;
+      const newBudgetRemaining = Math.round(((t.budget_remaining || 0) + realAmount) * 10000) / 10000;
+      const newMaxCompletions = (t.max_completions || 0) + addedSlots;
+      db.db.prepare("UPDATE tasks SET budget_remaining=?, max_completions=?, status=? WHERE task_id=?")
+        .run(newBudgetRemaining, newMaxCompletions, newStatus, taskId);
+      return true;
+    })();
+    if (!addOk) {
       return bot.sendMessage(cid, "❌ Solde insuffisant.", { reply_markup: KB_CANCEL });
     }
     const newBudgetRemaining = Math.round(((t.budget_remaining || 0) + realAmount) * 10000) / 10000;
     const newMaxCompletions = (t.max_completions || 0) + addedSlots;
-    const newStatus = (t.status === "completed" || t.status === "paused") ? "active" : t.status;
-    db.db.prepare("UPDATE tasks SET budget_remaining=?, max_completions=?, status=? WHERE task_id=?")
-      .run(newBudgetRemaining, newMaxCompletions, newStatus, taskId);
     clearState(uid);
     return bot.sendMessage(cid,
       `✅ <b>Budget ajouté !</b>\n\n` +

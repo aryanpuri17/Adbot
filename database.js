@@ -787,7 +787,7 @@ function approveWithdrawal(withdrawalId, txHash = "") {
 }
 
 function markWithdrawalPaid(withdrawalId, txHash = "") {
-  db.prepare("UPDATE withdrawals SET status = 'paid', tx_hash = ?, processed_at = CURRENT_TIMESTAMP WHERE withdrawal_id = ?").run(txHash, withdrawalId);
+  db.prepare("UPDATE withdrawals SET status = 'paid', tx_hash = ?, processed_at = CURRENT_TIMESTAMP WHERE withdrawal_id = ? AND status = 'approved'").run(txHash, withdrawalId);
 }
 
 function rejectWithdrawal(withdrawalId, adminNote = "") {

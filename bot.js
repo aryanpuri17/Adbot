@@ -192,17 +192,16 @@ function KBI(rows) { return { inline_keyboard: rows }; }
 
 function KB_MAIN(uid) {
   const rows = [
-    ["💳 Balance",  "📋 Tâches"],
-    ["🎮 Jeux",     "🏆 Concours"],
-    ["👥 Parrainage","🎁 Bonus"],
-    ["📊 Profil",   "🎫 Support"],
-    ["⚙️ Paramètres"],
+    ["💰 Gains",     "📋 Tâches"],
+    ["🎮 Jeux",      "🏆 Concours"],
+    ["👥 Parrainer", "🎁 Bonus du jour"],
+    ["👤 Profil",    "💬 Support"],
   ];
   if (isAdmin(uid)) rows.push(["👑 Admin"]);
   return KB(rows);
 }
 
-const KB_BALANCE  = KB([["💳 Déposer","🏧 Retirer"],["📋 Historique","📜 Transactions"],["🏠 Accueil"]]);
+const KB_BALANCE  = KB([["💰 Déposer","🏧 Retirer"],["📋 Historique","📜 Transactions"],["🏠 Accueil"]]);
 const KB_TASKS    = KB([["📢 Canaux","👥 Groupes"],["🤖 Bots","🎮 Mini Apps"],["➕ Créer Campagne","📊 Mes Campagnes"],["🏠 Accueil"]]);
 const KB_GAMES    = KB([["🎡 Roue Fortune"],["🎲 Dés","🪙 Pile/Face"],["🏆 Jackpot","🔢 Devinette"],["🏠 Accueil"]]);
 const KB_PARRAIN  = KB([["🔗 Mon Lien"],["🏠 Accueil"]]);
@@ -246,8 +245,8 @@ async function sendCaptcha(cid, uid) {
   setState(uid, "captcha", { answer: captcha.answer, attempts: 0 });
   const rows = [captcha.choices.map(c => ({ text: `${c}`, callback_data: `cap_${c}` }))];
   return bot.sendMessage(cid,
-    `🛡️ <b>VÉRIFICATION ANTI-BOT</b>\n\n` +
-    `Pour continuer, résous ce calcul :\n\n` +
+    `🛡️ <b>Vérification rapide</b>\n\n` +
+    `Résous ce calcul pour continuer :\n\n` +
     `<b>${captcha.question}</b>`,
     { parse_mode: "HTML", reply_markup: KBI(rows) });
 }
@@ -301,7 +300,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
     if (refBy) {
       const bonus = parseFloat(db.getSetting("referral_bonus", config.REFERRAL_BONUS));
       bot.sendMessage(refBy,
-        `🎉 <b>Nouveau filleul !</b>\n👤 ${esc(msg.from.first_name)}\n💰 +${fmt(bonus)} crédité !`,
+        `🎉 <b>Nouveau filleul !</b>\n\n👤 <b>${esc(msg.from.first_name)}</b> vient de rejoindre via ton lien.\n💰 +<b>${fmt(bonus)}</b> crédité dans tes gains !`,
         { parse_mode: "HTML" }).catch(() => {});
     }
   } else {
@@ -319,13 +318,15 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
     const dailyMin = parseFloat(db.getSetting("daily_bonus_min", config.DAILY_BONUS_MIN));
     const dailyMax = parseFloat(db.getSetting("daily_bonus_max", config.DAILY_BONUS_MAX));
     await bot.sendMessage(cid,
-      `🎉 <b>Bienvenue sur ${botName} !</b>\n\n` +
-      `💰 Gagne de l'argent réel en :\n` +
-      `   ✅ Complétant des tâches Telegram\n` +
-      `   👥 Parrainant tes amis (+${fmt(refBonus)}/filleul)\n` +
-      `   🎁 Bonus quotidien (${fmt(dailyMin)}–${fmt(dailyMax)}/jour)\n` +
-      `   🎮 Mini-jeux (Roue, Dés, Jackpot...)\n\n` +
-      `🛡️ Vérifions d'abord que tu n'es pas un robot :`,
+      `🚀 <b>Bienvenue sur ${esc(botName)} !</b>\n\n` +
+      `Gagne de l'argent réel en crypto — directement sur Telegram.\n\n` +
+      `✅ <b>Tâches</b> — rejoins des canaux, gagne à chaque fois\n` +
+      `👥 <b>Parrainage</b> — ${fmt(refBonus)} par ami invité\n` +
+      `🎁 <b>Bonus quotidien</b> — connexion = argent\n` +
+      `🎮 <b>Mini-jeux</b> — Roue, Dés, Jackpot progressif\n\n` +
+      `💸 Paiements en TON · BNB · USDT\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🛡️ Confirme que tu es humain pour continuer :`,
       { parse_mode: "HTML" });
     return sendCaptcha(cid, uid);
   }
@@ -395,6 +396,11 @@ bot.on("callback_query", async (q) => {
     return bot.answerCallbackQuery(q.id, { text: "❌ Rejoins tous les canaux d'abord !", show_alert: true }).catch(() => {});
   }
 
+  if (data === "go_home") {
+    clearState(uid);
+    return sendHome(cid, db.getUser(uid));
+  }
+
   if (data === "claim_daily_bonus") {
     return claimBonus(cid, uid);
   }
@@ -453,11 +459,46 @@ bot.on("callback_query", async (q) => {
   }
 
   // ─── Retraits ───
+  if (data === "wd_confirm") {
+    const st2 = getState(uid);
+    if (!st2 || st2.state !== "wd_pending_confirm") return;
+    const { method, amount, wallet } = st2.data;
+    clearState(uid);
+    const wdId = db.createWithdrawal(uid, method, amount, wallet);
+    if (!wdId) return bot.sendMessage(cid, "❌ Erreur lors de la création du retrait.", { reply_markup: KB_MAIN(uid) });
+    const wd = db.db.prepare("SELECT * FROM withdrawals WHERE withdrawal_id=?").get(wdId);
+    bot.sendMessage(cid,
+      `✅ <b>Retrait soumis avec succès !</b>\n\n` +
+      `💵 Tu recevras : <b>${fmt(wd.net_amount)}</b>\n` +
+      `👛 Vers : <code>${wallet}</code>\n\n` +
+      `⏳ Traitement sous 24h.`,
+      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    for (const aid of config.ADMIN_IDS) {
+      bot.sendMessage(aid,
+        `🏧 <b>Retrait #${wdId}</b>\n👤 ${esc(user.first_name)} (${uid})\n💵 ${fmt(wd.net_amount)} (frais: ${fmt(wd.fee)})\n👛 <code>${wallet}</code>\n📌 ${method}`,
+        { parse_mode: "HTML", reply_markup: KBI([[
+          { text: "✅ Payé",    callback_data: `pay_wd_${wdId}` },
+          { text: "❌ Rejeter", callback_data: `rej_wd_${wdId}` }
+        ]]) }).catch(() => {});
+    }
+    return;
+  }
+  if (data === "wd_cancel") {
+    clearState(uid);
+    return bot.editMessageText("❌ Retrait annulé.", { chat_id: cid, message_id: mid }).catch(() =>
+      bot.sendMessage(cid, "❌ Retrait annulé.", { reply_markup: KB_MAIN(uid) }));
+  }
   if (data.startsWith("wd_")) {
     const method = data.replace("wd_","");
-    setState(uid, "wd_wallet", { method });
+    if (!config.WITHDRAWAL_METHODS[method]) return;
+    const minW = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
+    const maxW = parseFloat(db.getSetting("max_withdrawal", config.MAX_WITHDRAWAL));
+    setState(uid, "wd_amount", { method });
     return bot.sendMessage(cid,
-      `🏧 <b>RETRAIT ${config.WITHDRAWAL_METHODS[method]?.name}</b>\n\nEnvoie ton adresse wallet :`,
+      `🏧 <b>RETRAIT ${config.WITHDRAWAL_METHODS[method]?.name}</b>\n\n` +
+      `💰 Solde retirable : <b>${fmt(user.balance)}</b>\n` +
+      `📌 Min : <b>${fmt(minW)}</b> · Max : <b>${fmt(maxW)}</b>\n\n` +
+      `Combien veux-tu retirer ?`,
       { parse_mode: "HTML", reply_markup: KB_CANCEL });
   }
 
@@ -671,18 +712,17 @@ function sendHome(cid, user) {
   const lastBonus = user.last_daily_bonus ? new Date(user.last_daily_bonus) : null;
   const bonusReady = !lastBonus || new Date().toDateString() !== lastBonus.toDateString();
 
+  const bonusTxt = bonusReady ? `\n\n🎁 <b>Bonus du jour disponible !</b>` : "";
+  const streakTxt = streak > 0 ? `\n🔥 Série : <b>${streak} jour${streak > 1 ? "s" : ""}</b>` : "";
+  const jackpotTxt = jackpot > 0 ? `\n🎰 Jackpot : <b>${fmt(jackpot)}</b>` : "";
   bot.sendMessage(cid,
-    `╔════════════════════╗\n` +
-    `  💎 <b>${esc(botName)}</b>\n` +
-    `╚════════════════════╝\n\n` +
+    `🏠 <b>${esc(botName)}</b>\n\n` +
     `👋 Salut <b>${esc(user.first_name)}</b> !\n\n` +
     `💰 Gains : <b>${fmt(earnedBal)}</b>\n` +
-    `💳 Dépôt : <b>${fmt(depBal)}</b>\n` +
-    `✅ Tâches : <b>${user.tasks_completed}</b> | 👥 Filleuls : <b>${user.referral_count}</b>\n` +
-    `📅 Aujourd'hui : <b>${user.daily_tasks_done}/${maxT}</b>` +
-    (streak > 0 ? `\n🔥 Série bonus : <b>${streak} jour${streak > 1 ? "s" : ""}</b>` : "") +
-    (bonusReady ? `\n🎁 <b>Bonus disponible !</b>` : "") +
-    (jackpot > 0 ? `\n🎰 Jackpot : <b>${fmt(jackpot)}</b>` : ""),
+    `💳 Dépôt : <b>${fmt(depBal)}</b>\n\n` +
+    `📋 Tâches aujourd'hui : <b>${user.daily_tasks_done}/${maxT}</b>\n` +
+    `👥 Filleuls : <b>${user.referral_count}</b>` +
+    streakTxt + jackpotTxt + bonusTxt,
     { parse_mode: "HTML", reply_markup: KB_MAIN(user.user_id) });
 }
 
@@ -693,11 +733,9 @@ function sendHome(cid, user) {
 function showTasksMenu(cid, user) {
   const maxT = db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY);
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n` +
-    `   📋 <b>TÂCHES</b>\n` +
-    `└─────────────────────┘\n\n` +
-    `📅 Aujourd'hui : <b>${user.daily_tasks_done || 0}/${maxT}</b>\n\n` +
-    `Choisis une catégorie ci-dessous 👇`,
+    `📋 <b>TÂCHES</b>\n\n` +
+    `📅 Aujourd'hui : <b>${user.daily_tasks_done || 0}/${maxT}</b> tâches complétées\n\n` +
+    `Choisis une catégorie pour commencer à gagner :`,
     { parse_mode: "HTML", reply_markup: KB_TASKS });
 }
 
@@ -733,13 +771,14 @@ async function showTasksByType(cid, uid, type, user) {
       durTxt = `⏱ Reste abonné : ${hours}h`;
     }
 
+    const completionsTxt = task.current_completions > 0
+      ? `\n✅ Déjà complété par <b>${task.current_completions}</b> personne${task.current_completions > 1 ? "s" : ""}`
+      : "";
     await bot.sendMessage(cid,
-      `╔═══════════════════════╗\n` +
-      `  ${typeLabel}\n` +
-      `╚═══════════════════════╝\n\n` +
-      `📌 <b>${esc(task.title)}</b>\n\n` +
+      `${typeLabel} <b>${esc(task.title)}</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
       `💰 Récompense : <b>${fmt(task.reward)}</b>\n` +
-      `${durTxt}`,
+      `${durTxt}${completionsTxt}`,
       {
         parse_mode: "HTML",
         reply_markup: KBI([
@@ -885,9 +924,12 @@ async function handleVerifyTask(cid, uid, taskId, user) {
   // Tout OK — créditer
   const r = db.verifyTaskCompletion(taskId, uid, true);
   if (r.success) {
+    const nuAfter = db.getUser(uid);
     return bot.sendMessage(cid,
-      `✅ <b>Tâche validée !</b>\n\n💰 +${fmt(r.reward)} crédité !\n💵 Nouvelle balance : ${fmt((db.getUser(uid)).balance)}`,
-      { parse_mode: "HTML" });
+      `✅ <b>Tâche validée !</b>\n\n` +
+      `💰 +<b>${fmt(r.reward)}</b> crédité !\n` +
+      `💵 Gains : <b>${fmt(nuAfter.balance)}</b>`,
+      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
   }
   return bot.sendMessage(cid, "❌ Validation impossible.");
 }
@@ -901,16 +943,15 @@ function showBalance(cid, user) {
   const earned = user.balance || 0;
   const deposit = user.deposit_balance || 0;
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n` +
-    `  💳 <b>MA BALANCE</b>\n` +
-    `└─────────────────────┘\n\n` +
-    `💰 <b>Gains (retirable) :</b> ${fmt(earned)}\n` +
-    `💳 <b>Dépôt (non retirable) :</b> ${fmt(deposit)}\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
-    `📊 Total : <b>${fmt(earned + deposit)}</b>\n\n` +
-    `📥 Total déposé : ${fmt(user.total_deposited)}\n` +
-    `📤 Total retiré : ${fmt(user.total_withdrawn)}\n\n` +
-    `ℹ️ Les dépôts ne sont pas retirables.\nIls servent à créer des campagnes ou jouer.`,
+    `💳 <b>MA BALANCE</b>\n\n` +
+    `💰 Gains (retirable)\n` +
+    `   <b>${fmt(earned)}</b>\n\n` +
+    `💳 Dépôt (campagnes/jeux)\n` +
+    `   <b>${fmt(deposit)}</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📊 Total : <b>${fmt(earned + deposit)}</b>\n` +
+    `📥 Déposé : ${fmt(user.total_deposited)} · 📤 Retiré : ${fmt(user.total_withdrawn)}\n\n` +
+    `ℹ️ Les fonds déposés ne sont pas retirables.`,
     { parse_mode: "HTML", reply_markup: KB_BALANCE });
 }
 
@@ -921,11 +962,8 @@ function showDeposit(cid) {
     .map(([key, m]) => [{ text: `${m.name} — min ${m.minAmount} ${m.symbol}`, callback_data: `dep_${key}` }]);
 
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n` +
-    `  💳 <b>DÉPOSER</b>\n` +
-    `└─────────────────────┘\n\n` +
-    `⚡ Dépôt automatique\n` +
-    `📊 Prix en temps réel\n\n` +
+    `💰 <b>DÉPOSER DES FONDS</b>\n\n` +
+    `⚡ Détection automatique · Prix temps réel\n\n` +
     `Choisis ta crypto :`,
     { parse_mode: "HTML", reply_markup: KBI(rows) });
 }
@@ -934,10 +972,11 @@ function showWithdraw(cid, user) {
   const minW = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
   if (user.balance < minW) {
     return bot.sendMessage(cid,
-      `┌─────────────────────┐\n` +
-      `  🏧 <b>RETRAIT</b>\n` +
-      `└─────────────────────┘\n\n` +
-      `❌ Solde insuffisant.\n💵 Ton solde : ${fmt(user.balance)}\n📌 Minimum : ${fmt(minW)}`,
+      `🏧 <b>RETRAIT</b>\n\n` +
+      `❌ Solde retirable insuffisant.\n\n` +
+      `💰 Ton solde : <b>${fmt(user.balance)}</b>\n` +
+      `📌 Minimum requis : <b>${fmt(minW)}</b>\n\n` +
+      `Continue à compléter des tâches pour atteindre le minimum !`,
       { parse_mode: "HTML" });
   }
 
@@ -946,19 +985,17 @@ function showWithdraw(cid, user) {
     .map(([key,m]) => [{ text: m.name, callback_data: `wd_${key}` }]);
 
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n` +
-    `  🏧 <b>RETRAIT</b>\n` +
-    `└─────────────────────┘\n\n` +
-    `💵 Solde : ${fmt(user.balance)}\n` +
-    `📌 Minimum : ${fmt(minW)}\n\n` +
-    `Choisis la méthode :`,
+    `🏧 <b>RETRAIT</b>\n\n` +
+    `💰 Solde retirable : <b>${fmt(user.balance)}</b>\n` +
+    `📌 Minimum : <b>${fmt(minW)}</b>\n\n` +
+    `Choisis ta méthode de paiement :`,
     { parse_mode: "HTML", reply_markup: KBI(rows) });
 }
 
 function showHistory(cid, uid) {
   const deps = db.getUserDeposits(uid, 5);
   const wds  = db.getUserWithdrawals(uid, 5);
-  let txt = `┌─────────────────────┐\n  📋 <b>HISTORIQUE</b>\n└─────────────────────┘\n\n`;
+  let txt = `📋 <b>HISTORIQUE</b>\n\n`;
   txt += `<b>Derniers dépôts :</b>\n`;
   if (!deps.length) txt += "Aucun.\n";
   else deps.forEach(d => { txt += `• ${fmt(d.amount)} ${d.method} — ${d.status}\n`; });
@@ -974,11 +1011,18 @@ function showHistory(cid, uid) {
 
 function showGames(cid, user) {
   const jackpot = parseFloat(db.getSetting("jackpot_pool","0"));
+  const lastWinner = db.getSetting("jackpot_last_winner", "");
+  const lastWinAmt = db.getSetting("jackpot_last_win_amount", "");
+  const lastWinnerTxt = lastWinner
+    ? `\n🏆 Dernier gagnant jackpot : <b>${esc(lastWinner)}</b>${lastWinAmt ? ` (+${lastWinAmt})` : ""}`
+    : "";
+  const total = (user.balance || 0) + (user.deposit_balance || 0);
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  🎮 <b>MINI-JEUX</b>\n└─────────────────────┘\n\n` +
-    `💵 Balance : <b>${fmt(user.balance)}</b>\n` +
+    `🎮 <b>MINI-JEUX</b>\n\n` +
+    `💰 Ton solde : <b>${fmt(total)}</b>\n` +
     `🎟️ Spins gratuits : <b>${user.free_spins || 0}</b>\n` +
-    `🏆 Jackpot : <b>${fmt(jackpot)}</b>`,
+    `🎰 Jackpot progressif : <b>${fmt(jackpot)}</b>` +
+    lastWinnerTxt,
     { parse_mode: "HTML", reply_markup: KB_GAMES });
 }
 
@@ -1071,8 +1115,8 @@ async function playCoinflip(cid, uid, choice, bet, user) {
 
   if (!debitSmart(uid, bet, "cf_bet", `Pile/Face mise ${fmtUSD(bet)}`))
     return bot.sendMessage(cid, "❌ Solde insuffisant.");
-  // Asymétrie maison : 35% chance utilisateur gagne (mode agressif)
-  const userWinsRoll = Math.random() < 0.35;
+  // 45% de chance de gagner (maison à 13.5% avec multiplicateur 1.9)
+  const userWinsRoll = Math.random() < 0.45;
   const result = userWinsRoll ? choice : (choice === "pile" ? "face" : "pile");
   const won = result === choice;
 
@@ -1122,6 +1166,8 @@ async function playJackpot(cid, uid, user) {
 
     const winner = db.getUser(uid);
     const winnerName = winner?.first_name || "Anonyme";
+    db.setSetting("jackpot_last_winner", winnerName);
+    db.setSetting("jackpot_last_win_amount", fmt(pool));
 
     // Message au gagnant
     bot.sendMessage(cid,
@@ -1202,7 +1248,7 @@ async function playGuess(cid, uid, guess, user) {
 
 function showGiveaways(cid) {
   const list = db.getActiveGiveaways();
-  let txt = `┌─────────────────────┐\n  🏆 <b>CONCOURS ACTIFS</b>\n└─────────────────────┘\n\n`;
+  let txt = `🏆 <b>CONCOURS ACTIFS</b>\n\n`;
   if (!list.length) txt += "Aucun concours actif. Reviens plus tard !";
   else list.forEach(g => {
     const count = db.db.prepare("SELECT COUNT(*) as n FROM giveaway_entries WHERE giveaway_id=?").get(g.giveaway_id);
@@ -1299,15 +1345,21 @@ async function showReferral(cid, user) {
     });
   }
 
+  const shareText = encodeURIComponent(`💰 Gagne de l'argent réel sur Telegram !\n\nRécompenses crypto, tâches simples, jeux. Rejoint maintenant :`);
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`;
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  👥 <b>PARRAINAGE</b>\n└─────────────────────┘\n\n` +
-    `🔗 Ton lien :\n<code>${link}</code>\n\n` +
+    `👥 <b>PARRAINAGE</b>\n\n` +
+    `🔗 Ton lien de parrainage :\n<code>${link}</code>\n\n` +
     `💰 Bonus par filleul : <b>${fmt(bonus)}</b>\n` +
-    `📊 Commission gains : <b>${pct}%</b>\n` +
+    `📊 Commission sur leurs gains : <b>${pct}%</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `👥 Total filleuls : <b>${user.referral_count}</b>\n` +
     `💸 Gains parrainage : <b>${fmt(user.referral_earnings || 0)}</b>\n` +
     refListTxt,
-    { parse_mode: "HTML", reply_markup: KB_PARRAIN });
+    { parse_mode: "HTML", reply_markup: KBI([
+      [{ text: "📤 Partager mon lien", url: shareUrl }],
+      [{ text: "🏠 Accueil", callback_data: "go_home" }]
+    ]) });
 }
 
 // ─────────────────────────────────────────────
@@ -1323,9 +1375,11 @@ function claimBonus(cid, uid) {
     return bot.sendMessage(cid, `⏰ <b>Déjà réclamé !</b>\n\nProchain bonus dans <b>${hoursLeft}h</b>`, { parse_mode: "HTML" });
   }
   const nu = db.getUser(uid);
-  const streakTxt = r.streak > 1 ? `\n🔥 Série : <b>${r.streak} jours</b>` + (r.multiplier > 1 ? ` (x${r.multiplier})` : "") : "";
+  const streakTxt = r.streak > 1 ? `\n🔥 Série : <b>${r.streak} jours</b>${r.multiplier > 1 ? ` · ×${r.multiplier}` : ""}` : "";
   bot.sendMessage(cid,
-    `🎁 <b>Bonus réclamé !</b>\n\n💰 +${fmt(r.amount)} ajouté à tes gains !${streakTxt}\n\n💵 Balance : ${fmt(nu.balance)}`,
+    `🎁 <b>Bonus réclamé !</b>\n\n` +
+    `💰 +<b>${fmt(r.amount)}</b> ajouté à tes gains !${streakTxt}\n\n` +
+    `💰 Nouveau solde : <b>${fmt(nu.balance)}</b>`,
     { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
 }
 
@@ -1368,15 +1422,16 @@ function showDailyBonus(cid, uid, user) {
   const baseRange = `${(minB * multiplier).toFixed(4)}$ – ${(maxB * multiplier).toFixed(4)}$`;
 
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  🎁 <b>BONUS QUOTIDIEN</b>\n└─────────────────────┘\n\n` +
+    `🎁 <b>BONUS QUOTIDIEN</b>\n\n` +
     `🔥 Série actuelle : <b>${streak} jour${streak > 1 ? "s" : ""}</b>\n` +
     `${streakLabel}\n\n` +
     `💰 Bonus aujourd'hui : <b>${baseRange}</b>\n` +
-    (multiplier > 1 ? `✨ Multiplicateur série : <b>x${multiplier}</b>\n` : "") +
-    `📈 Prochain palier : <b>${nextMilestone} jours</b>` +
+    (multiplier > 1 ? `✨ Multiplicateur : <b>×${multiplier}</b>\n` : "") +
+    `📈 Prochain palier : <b>${nextMilestone} jours</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
     (alreadyClaimed
-      ? `\n\n✅ <b>Déjà réclamé aujourd'hui !${timeTxt}</b>`
-      : `\n\n🎯 <b>Prêt à réclamer !</b>`),
+      ? `✅ Déjà réclamé aujourd'hui.${timeTxt}`
+      : `🎯 <b>Ton bonus t'attend !</b>`),
     { parse_mode: "HTML",
       reply_markup: alreadyClaimed
         ? KB([["🏠 Accueil"]])
@@ -1403,23 +1458,22 @@ function showProfile(cid, uid) {
   const streak = user.daily_streak || 0;
 
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  📊 <b>MON PROFIL</b>\n└─────────────────────┘\n\n` +
-    `👤 <b>${esc(user.first_name)}</b>${vipBadge ? ` ${vipBadge}` : ""}\n` +
+    `👤 <b>MON PROFIL</b>\n\n` +
+    `<b>${esc(user.first_name)}</b>${vipBadge ? ` · ${vipBadge}` : ""}\n` +
     `🆔 <code>${user.user_id}</code>\n\n` +
-    `🏆 Niveau <b>${lvl}</b>\n` +
-    `⚡ XP : <b>${xp}</b> / <b>${nextThresh}</b>\n` +
+    `🏆 Niveau <b>${lvl}</b> · ⚡ <b>${xp}</b>/<b>${nextThresh}</b> XP\n` +
     `[${bar}] ${pct * 10}%\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `✅ Tâches complétées : <b>${user.tasks_completed}</b>\n` +
     `💰 Total gagné : <b>${fmt(user.total_earned)}</b>\n` +
     `👥 Filleuls : <b>${user.referral_count}</b>\n` +
     `💸 Gains parrainage : <b>${fmt(user.referral_earnings || 0)}</b>\n` +
-    `🔥 Série bonus : <b>${streak} jour${streak > 1 ? "s" : ""}</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `🔥 Série bonus : <b>${streak} jour${streak > 1 ? "s" : ""}</b>\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `🏅 Classement : <b>#${rank}</b>\n` +
-    `📅 Inscrit le : <b>${fmtDate(user.created_at)}</b>`,
+    `📅 Inscrit : <b>${fmtDate(user.created_at)}</b>`,
     { parse_mode: "HTML",
-      reply_markup: KB([["🏅 Classement", "📜 Transactions"], ["🏠 Accueil"]]) });
+      reply_markup: KB([["🏅 Classement", "📜 Transactions"], ["⚙️ Paramètres"], ["🏠 Accueil"]]) });
 }
 
 function showLeaderboard(cid, uid) {
@@ -1431,7 +1485,7 @@ function showLeaderboard(cid, uid) {
   const myRankRow = db.db.prepare("SELECT COUNT(*) as r FROM users WHERE total_earned > ? AND is_banned = 0").get((db.getUser(uid) || {}).total_earned || 0);
   const myRank = (myRankRow?.r || 0) + 1;
 
-  let txt = `┌─────────────────────┐\n  🏅 <b>CLASSEMENT</b>\n└─────────────────────┘\n\n`;
+  let txt = `🏅 <b>CLASSEMENT</b>\n\n`;
 
   txt += `💰 <b>Top Gains</b>\n`;
   topEarners.forEach((u, i) => { txt += `${medals[i] || `${i+1}.`} ${esc(u.first_name)} — ${fmt(u.total_earned)}\n`; });
@@ -1442,14 +1496,14 @@ function showLeaderboard(cid, uid) {
   txt += `\n👥 <b>Top Parrainage</b>\n`;
   topReferrers.forEach((u, i) => { txt += `${medals[i] || `${i+1}.`} ${esc(u.first_name)} — ${u.referral_count} filleuls\n`; });
 
-  txt += `\n━━━━━━━━━━━━━━━━━━━━\n🏅 Ton rang : <b>#${myRank}</b>`;
+  txt += `\n━━━━━━━━━━━━━━━━━━━━━━\n🏅 Ton rang : <b>#${myRank}</b>`;
 
   bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB([["🏠 Accueil"]]) });
 }
 
 function showMyCampaigns(cid, uid) {
   const tasks = db.getUserTasks(uid);
-  let txt = `┌─────────────────────┐\n  📊 <b>MES CAMPAGNES</b>\n└─────────────────────┘\n\n`;
+  let txt = `📊 <b>MES CAMPAGNES</b>\n\n`;
   if (!tasks.length) {
     txt += "Aucune campagne créée.\n\n💡 Crée ta première campagne via ➕ Créer Campagne !";
     return bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KB_TASKS });
@@ -1466,7 +1520,7 @@ function showMyCampaigns(cid, uid) {
 
 function showTransactions(cid, uid) {
   const txs = db.getUserTransactions(uid, 15);
-  let txt = `┌─────────────────────┐\n  📜 <b>TRANSACTIONS</b>\n└─────────────────────┘\n\n`;
+  let txt = `📜 <b>TRANSACTIONS</b>\n\n`;
   if (!txs.length) {
     txt += "Aucune transaction.";
   } else {
@@ -1500,10 +1554,11 @@ function showCreateCampaign(cid, user) {
     [{ text: "🤖 Bot Telegram",    callback_data: "ct_type_bot"     }],
     [{ text: "🎮 Mini App",        callback_data: "ct_type_miniapp" }],
   ];
+  const totalCamp = (user.balance || 0) + (user.deposit_balance || 0);
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  ➕ <b>CRÉER CAMPAGNE</b>\n└─────────────────────┘\n\n` +
-    `💵 Balance : <b>${fmt(user.balance)}</b>\n\n` +
-    `Choisis le type de campagne :`,
+    `➕ <b>CRÉER UNE CAMPAGNE</b>\n\n` +
+    `💳 Solde disponible : <b>${fmt(totalCamp)}</b>\n\n` +
+    `Quel type de campagne veux-tu lancer ?`,
     { parse_mode: "HTML", reply_markup: KBI(rows) });
 }
 
@@ -1555,9 +1610,10 @@ async function verifyBotIsAdmin(chatUsername) {
 function showSupport(cid, uid) {
   const su = db.getSetting("support_username","");
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  🎫 <b>SUPPORT</b>\n└─────────────────────┘\n\n` +
-    `${su ? `📩 Contact : @${su}\n\n` : ""}Envoie ton message ici :`,
-    { parse_mode: "HTML" });
+    `💬 <b>SUPPORT</b>\n\n` +
+    `${su ? `📩 Tu peux aussi nous contacter directement : @${esc(su)}\n\n` : ""}` +
+    `Décris ton problème et nous te répondrons dès que possible :`,
+    { parse_mode: "HTML", reply_markup: KB_CANCEL });
   setState(uid, "support_msg");
 }
 
@@ -1571,17 +1627,17 @@ function showSettings(cid, user) {
   const minW = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
   const feeP = parseFloat(db.getSetting("withdrawal_fee_percent", config.WITHDRAWAL_FEE_PERCENT));
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  ⚙️ <b>MON COMPTE</b>\n└─────────────────────┘\n\n` +
+    `⚙️ <b>PARAMÈTRES</b>\n\n` +
     `👤 <b>${esc(user.first_name)}</b>\n` +
     `🆔 <code>${user.user_id}</code>\n` +
-    `🏆 Niveau <b>${user.level || 1}</b> | ⚡ ${user.xp || 0} XP\n` +
+    `🏆 Niveau <b>${user.level || 1}</b> · ⚡ ${user.xp || 0} XP\n` +
     `💎 VIP : <b>${vipNames[user.vip_level || 0]}</b>\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `🔗 Code parrainage :\n<code>${user.referral_code || "N/A"}</code>\n\n` +
     `📊 Min retrait : <b>${fmt(minW)}</b>\n` +
     `💸 Frais retrait : <b>${feeP}%</b>\n` +
     `📅 Inscrit : <b>${fmtDate(user.created_at)}</b>`,
-    { parse_mode: "HTML", reply_markup: KB([["📊 Profil", "👥 Parrainage"], ["🏠 Accueil"]]) });
+    { parse_mode: "HTML", reply_markup: KB([["👤 Profil", "👥 Parrainer"], ["🏠 Accueil"]]) });
 }
 
 // ─────────────────────────────────────────────
@@ -1591,13 +1647,16 @@ function showSettings(cid, user) {
 function showAdmin(cid) {
   const s = db.getStats();
   bot.sendMessage(cid,
-    `┌─────────────────────┐\n  👑 <b>PANNEAU ADMIN</b>\n└─────────────────────┘\n\n` +
-    `👤 ${s.users} users (${s.activeUsers24h} actifs)\n` +
-    `📋 ${s.pendingTasks} tâches | 📸 ${s.pendingProofs} preuves\n` +
-    `🏧 ${s.pendingWithdrawals} retraits | 💳 ${s.pendingDeposits} dépôts\n` +
-    `🎫 ${s.openTickets} tickets\n\n` +
-    `💵 Déposé: ${fmt(s.totalDeposited)} | Retiré: ${fmt(s.totalWithdrawn)}\n` +
-    `📈 Profit: ${fmt(s.profit || 0)}`,
+    `👑 <b>PANNEAU ADMIN</b>\n\n` +
+    `👤 <b>${s.users}</b> utilisateurs · <b>${s.activeUsers24h}</b> actifs aujourd'hui\n\n` +
+    `⏳ En attente :\n` +
+    `   📋 ${s.pendingTasks} tâches · 📸 ${s.pendingProofs} preuves\n` +
+    `   🏧 ${s.pendingWithdrawals} retraits · 💳 ${s.pendingDeposits} dépôts\n` +
+    `   🎫 ${s.openTickets} tickets\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `💵 Déposé : <b>${fmt(s.totalDeposited)}</b>\n` +
+    `💸 Retiré : <b>${fmt(s.totalWithdrawn)}</b>\n` +
+    `📈 Profit plateforme : <b>${fmt(s.profit || 0)}</b>`,
     { parse_mode: "HTML", reply_markup: KB_ADMIN });
 }
 
@@ -1856,19 +1915,24 @@ bot.on("message", async (msg) => {
   }
 
   // ─── Navigation principale ───
-  if (text === "💳 Balance")    { clearState(uid); return showBalance(cid, user); }
-  if (text === "📋 Tâches")     { clearState(uid); return showTasksMenu(cid, user); }
-  if (text === "🎮 Jeux")       { clearState(uid); return showGames(cid, user); }
-  if (text === "🏆 Concours")   { clearState(uid); return showGiveaways(cid); }
-  if (text === "👥 Parrainage") { clearState(uid); return showReferral(cid, user); }
-  if (text === "🎁 Bonus")      { clearState(uid); return showDailyBonus(cid, uid, user); }
-  if (text === "📊 Profil")     { clearState(uid); return showProfile(cid, uid); }
-  if (text === "🎫 Support")    { clearState(uid); return showSupport(cid, uid); }
-  if (text === "⚙️ Paramètres"){ clearState(uid); return showSettings(cid, user); }
+  if (text === "💰 Gains")       { clearState(uid); return showBalance(cid, user); }
+  if (text === "💳 Balance")     { clearState(uid); return showBalance(cid, user); }
+  if (text === "📋 Tâches")      { clearState(uid); return showTasksMenu(cid, user); }
+  if (text === "🎮 Jeux")        { clearState(uid); return showGames(cid, user); }
+  if (text === "🏆 Concours")    { clearState(uid); return showGiveaways(cid); }
+  if (text === "👥 Parrainer")   { clearState(uid); return showReferral(cid, user); }
+  if (text === "👥 Parrainage")  { clearState(uid); return showReferral(cid, user); }
+  if (text === "🎁 Bonus du jour"){ clearState(uid); return showDailyBonus(cid, uid, user); }
+  if (text === "🎁 Bonus")       { clearState(uid); return showDailyBonus(cid, uid, user); }
+  if (text === "👤 Profil")      { clearState(uid); return showProfile(cid, uid); }
+  if (text === "📊 Profil")      { clearState(uid); return showProfile(cid, uid); }
+  if (text === "💬 Support")     { clearState(uid); return showSupport(cid, uid); }
+  if (text === "🎫 Support")     { clearState(uid); return showSupport(cid, uid); }
+  if (text === "⚙️ Paramètres") { clearState(uid); return showSettings(cid, user); }
   if (text === "👑 Admin" && isAdmin(uid)) { clearState(uid); return showAdmin(cid); }
 
   // ─── Balance ───
-  if (text === "💳 Déposer")    { clearState(uid); return showDeposit(cid); }
+  if (text === "💰 Déposer" || text === "💳 Déposer") { clearState(uid); return showDeposit(cid); }
   if (text === "🏧 Retirer")    { clearState(uid); return showWithdraw(cid, user); }
   if (text === "📋 Historique")  { clearState(uid); return showHistory(cid, uid); }
   if (text === "📜 Transactions"){ clearState(uid); return showTransactions(cid, uid); }
@@ -1969,7 +2033,13 @@ bot.on("message", async (msg) => {
   // ─── Parrainage ───
   if (text === "🔗 Mon Lien") {
     if (!botInfo) botInfo = await bot.getMe();
-    return bot.sendMessage(cid, `<code>https://t.me/${botInfo.username}?start=ref_${uid}</code>`, { parse_mode: "HTML" });
+    const myLink = `https://t.me/${botInfo.username}?start=ref_${uid}`;
+    const shareT = encodeURIComponent(`💰 Rejoins-moi sur ${botInfo.first_name} et gagne de l'argent réel en crypto :`);
+    return bot.sendMessage(cid,
+      `🔗 <b>Ton lien de parrainage :</b>\n<code>${myLink}</code>`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "📤 Partager", url: `https://t.me/share/url?url=${encodeURIComponent(myLink)}&text=${shareT}` }]
+      ]) });
   }
 
   // ─── ADMIN navigation ───
@@ -2016,35 +2086,40 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  // Retrait — wallet
-  if (s === "wd_wallet") {
-    setState(uid, "wd_amount", { ...data, wallet: text });
-    const minW = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
-    const maxW = parseFloat(db.getSetting("max_withdrawal", config.MAX_WITHDRAWAL));
-    return bot.sendMessage(cid, `👛 OK.\n\n💵 Balance : ${fmt(user.balance)}\nMin : ${fmt(minW)} | Max : ${fmt(maxW)}\n\nMontant :`, { reply_markup: KB_CANCEL });
-  }
+  // Retrait — montant d'abord
   if (s === "wd_amount") {
     const amount = parseFloat(text);
     const minW   = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
     const maxW   = parseFloat(db.getSetting("max_withdrawal", config.MAX_WITHDRAWAL));
     user = db.getUser(uid);
     if (isNaN(amount) || amount < minW || amount > maxW || amount > user.balance) {
-      return bot.sendMessage(cid, `❌ Invalide.\nMin: ${fmt(minW)} | Max: ${fmt(maxW)} | Balance: ${fmt(user.balance)}`);
+      return bot.sendMessage(cid,
+        `❌ Montant invalide.\n\n💰 Ton solde : <b>${fmt(user.balance)}</b>\nMin : <b>${fmt(minW)}</b> · Max : <b>${fmt(maxW)}</b>\n\nEnvoie un montant valide :`,
+        { parse_mode: "HTML", reply_markup: KB_CANCEL });
     }
-    clearState(uid);
-    const wdId = db.createWithdrawal(uid, data.method, amount, data.wallet);
-    if (!wdId) return bot.sendMessage(cid, "❌ Erreur.", { reply_markup: KB_MAIN(uid) });
-    const wd = db.db.prepare("SELECT * FROM withdrawals WHERE withdrawal_id=?").get(wdId);
-    bot.sendMessage(cid, `✅ <b>Retrait demandé !</b>\n\n💵 ${fmt(wd.net_amount)}\n👛 <code>${data.wallet}</code>\n\n⏳ Traitement sous 24h.`, { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
-    for (const aid of config.ADMIN_IDS) {
-      bot.sendMessage(aid,
-        `🏧 <b>Retrait #${wdId}</b>\n👤 ${esc(user.first_name)} (${uid})\n💵 ${fmt(wd.net_amount)}\n👛 <code>${data.wallet}</code>\n📌 ${data.method}`,
-        { parse_mode: "HTML", reply_markup: KBI([[
-          { text: "✅ Payé",    callback_data: `pay_wd_${wdId}` },
-          { text: "❌ Rejeter", callback_data: `rej_wd_${wdId}` }
-        ]]) }).catch(() => {});
-    }
-    return;
+    const feeP2 = parseFloat(db.getSetting("withdrawal_fee_percent", config.WITHDRAWAL_FEE_PERCENT));
+    const fee2 = Math.round(amount * (feeP2 / 100) * 100) / 100;
+    const net2 = Math.round((amount - fee2) * 100) / 100;
+    setState(uid, "wd_wallet", { ...data, amount, fee: fee2, netAmount: net2 });
+    return bot.sendMessage(cid,
+      `👛 Envoie maintenant ton adresse wallet <b>${config.WITHDRAWAL_METHODS[data.method]?.name}</b> :`,
+      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+  }
+  // Retrait — adresse wallet
+  if (s === "wd_wallet") {
+    const { method, amount, fee: feeAmt, netAmount } = data;
+    setState(uid, "wd_pending_confirm", { method, amount, wallet: text, fee: feeAmt, netAmount });
+    return bot.sendMessage(cid,
+      `🏧 <b>Résumé du retrait</b>\n\n` +
+      `💵 Montant : <b>${fmt(amount)}</b>\n` +
+      `💸 Frais : <b>${fmt(feeAmt)}</b>\n` +
+      `✅ Tu recevras : <b>${fmt(netAmount)}</b>\n` +
+      `👛 Vers : <code>${esc(text)}</code>\n\n` +
+      `Confirmes-tu ce retrait ?`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "✅ Confirmer", callback_data: "wd_confirm" },
+         { text: "❌ Annuler",   callback_data: "wd_cancel" }]
+      ]) });
   }
 
   // Créer campagne — FSM (NOUVELLE VERSION)

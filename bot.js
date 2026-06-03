@@ -574,7 +574,7 @@ bot.on("callback_query", async (q) => {
   if (data.startsWith("ct_dur_")) {
     const hours = parseInt(data.replace("ct_dur_",""));
     const st    = getState(uid);
-    if (!st) return;
+    if (!st || st.state !== "ct_duration") return bot.answerCallbackQuery(q.id).catch(() => {});
     st.data.durationHours = hours;
     setState(uid, "ct_geo", st.data);
     return bot.sendMessage(cid,
@@ -588,7 +588,7 @@ bot.on("callback_query", async (q) => {
   // Géo : skip
   if (data === "ct_geo_skip") {
     const st = getState(uid);
-    if (!st) return;
+    if (!st || st.state !== "ct_geo") return bot.answerCallbackQuery(q.id).catch(() => {});
     st.data.geoCountries = null;
     setState(uid, "ct_vpn", st.data);
     const isChannelGroup = st.data.type === "channel" || st.data.type === "group";
@@ -605,7 +605,7 @@ bot.on("callback_query", async (q) => {
   // VPN preference
   if (data === "ct_vpn_allow" || data === "ct_vpn_disallow") {
     const st = getState(uid);
-    if (!st) return;
+    if (!st || st.state !== "ct_vpn") return bot.answerCallbackQuery(q.id).catch(() => {});
     st.data.allowVpn = data === "ct_vpn_allow" ? 1 : 0;
     setState(uid, "ct_rerun", st.data);
     const isChannelGroup = st.data.type === "channel" || st.data.type === "group";
@@ -622,7 +622,7 @@ bot.on("callback_query", async (q) => {
   // Rerun preference → passe à récompense
   if (data === "ct_rerun_yes" || data === "ct_rerun_no") {
     const st = getState(uid);
-    if (!st) return;
+    if (!st || st.state !== "ct_rerun") return bot.answerCallbackQuery(q.id).catch(() => {});
     st.data.allowRerun = data === "ct_rerun_yes" ? 1 : 0;
     const type = st.data.type;
     const isChannelGroup = type === "channel" || type === "group";
@@ -737,14 +737,16 @@ bot.on("callback_query", async (q) => {
   }
   if (data.startsWith("camp_manage_")) {
     const taskId = parseInt(data.replace("camp_manage_",""));
-    return showCampaignDetail(cid, uid, taskId);
+    bot.answerCallbackQuery(q.id).catch(() => {});
+    return showCampaignDetail(cid, uid, taskId, q.message.message_id);
   }
   if (data.startsWith("camp_pause_")) {
     const taskId = parseInt(data.replace("camp_pause_",""));
     const t = db.getTask(taskId);
     if (!t || t.creator_id !== uid || t.status !== "active") return bot.answerCallbackQuery(q.id, { text: "❌ Impossible." });
     db.updateTaskStatus(taskId, "paused");
-    return showCampaignDetail(cid, uid, taskId);
+    bot.answerCallbackQuery(q.id, { text: "⏸ Campagne mise en pause." }).catch(() => {});
+    return showCampaignDetail(cid, uid, taskId, q.message.message_id);
   }
   if (data.startsWith("camp_resume_")) {
     const taskId = parseInt(data.replace("camp_resume_",""));
@@ -753,7 +755,8 @@ bot.on("callback_query", async (q) => {
     if (t.status !== "paused") return bot.answerCallbackQuery(q.id, { text: "❌ Campagne non en pause." });
     if ((t.budget_remaining || 0) <= 0) return bot.answerCallbackQuery(q.id, { text: "❌ Budget épuisé. Ajoute du budget d'abord." });
     db.updateTaskStatus(taskId, "active");
-    return showCampaignDetail(cid, uid, taskId);
+    bot.answerCallbackQuery(q.id, { text: "▶️ Campagne reprise." }).catch(() => {});
+    return showCampaignDetail(cid, uid, taskId, q.message.message_id);
   }
   if (data.startsWith("camp_budget_")) {
     const taskId = parseInt(data.replace("camp_budget_",""));
@@ -1565,14 +1568,14 @@ function showMyCampaigns(cid, uid) {
   bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KBI(rows) });
 }
 
-function showCampaignDetail(cid, uid, taskId) {
+function showCampaignDetail(cid, uid, taskId, msgId = null) {
   const t = db.getTask(taskId);
   if (!t || t.creator_id !== uid) return bot.sendMessage(cid, "❌ Campagne introuvable.");
   const statusLabel = { pending:"⏳ En attente", active:"✅ Active", completed:"🏁 Terminée", rejected:"❌ Rejetée", paused:"⏸ En pause" };
   const pct = t.max_completions > 0 ? Math.round((t.current_completions / t.max_completions) * 100) : 0;
   let txt =
     `📋 <b>${esc(t.title)}</b>\n` +
-    `🔗 ${esc(t.link)}\n\n` +
+    `🔗 <code>${esc(t.link)}</code>\n\n` +
     `📊 Progression : <b>${t.current_completions}/${t.max_completions}</b> (${pct}%)\n` +
     `💰 Budget restant : <b>${fmt(t.budget_remaining)}</b>\n` +
     `💵 Récompense/user : <b>${fmt(t.reward)}</b>\n` +
@@ -1592,7 +1595,14 @@ function showCampaignDetail(cid, uid, taskId) {
     rows.push([{ text: "🗑️ Supprimer (remboursement)", callback_data: `camp_delete_${taskId}` }]);
   }
   rows.push([{ text: "◀️ Retour", callback_data: "back_to_campaigns" }]);
-  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KBI(rows) });
+
+  const opts = { parse_mode: "HTML", disable_web_page_preview: true, reply_markup: KBI(rows) };
+  if (msgId) {
+    bot.editMessageText(txt, { chat_id: cid, message_id: msgId, ...opts })
+      .catch(() => bot.sendMessage(cid, txt, opts));
+  } else {
+    bot.sendMessage(cid, txt, opts);
+  }
 }
 
 function showTransactions(cid, uid) {

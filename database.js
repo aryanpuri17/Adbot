@@ -336,7 +336,7 @@ function createUser(userId, username, firstName, lastName, referredBy = null) {
       const refBonus = parseFloat(getSetting("referral_bonus", config.REFERRAL_BONUS));
       updateBalance(referredBy, refBonus, "referral_bonus", `Parrainage: ${firstName}`);
       db.prepare("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?").run(referredBy);
-      addXP(referredBy, config.XP_PER_REFERRAL);
+      addXP(referredBy, parseInt(getSetting("xp_per_referral", config.XP_PER_REFERRAL)));
     }
   }
 
@@ -383,10 +383,12 @@ function addXP(userId, xp) {
 
   db.prepare("UPDATE users SET xp = ?, level = ? WHERE user_id = ?").run(newXP, newLevel, userId);
 
-  // Bonus de niveau si level up
-  if (newLevel > user.level && config.LEVEL_REWARDS[newLevel - 1]) {
-    const reward = config.LEVEL_REWARDS[newLevel - 1];
-    updateBalance(userId, reward, "level_up", `Niveau ${newLevel} atteint !`);
+  if (newLevel > user.level) {
+    const defaultReward = config.LEVEL_REWARDS[newLevel - 1] || 0;
+    const reward = parseFloat(getSetting(`level_reward_${newLevel}`, defaultReward));
+    if (reward > 0) {
+      updateBalance(userId, reward, "level_up", `Niveau ${newLevel} atteint !`);
+    }
     return { leveledUp: true, newLevel, reward };
   }
   return { leveledUp: false };
@@ -591,8 +593,9 @@ function verifyTaskCompletion(taskId, userId, forceApprove = false) {
   // Appliquer bonus VIP
   const user = getUser(userId);
   let reward = completion.reward;
-  if (user && user.vip_level > 0 && config.VIP_LEVELS[user.vip_level]) {
-    const bonusPercent = config.VIP_LEVELS[user.vip_level].bonus_percent || 0;
+  if (user && user.vip_level > 0) {
+    const defaultBonus = (config.VIP_LEVELS[user.vip_level] || {}).bonus_percent || 0;
+    const bonusPercent = parseFloat(getSetting(`vip_${user.vip_level}_task_bonus_pct`, defaultBonus));
     reward = Math.round((reward * (1 + bonusPercent / 100)) * 100) / 100;
   }
 
@@ -603,7 +606,8 @@ function verifyTaskCompletion(taskId, userId, forceApprove = false) {
 
   // Créditer l'utilisateur
   updateBalance(userId, reward, "task_reward", `Tâche: ${task.title}`, taskId);
-  addXP(userId, config.XP_PER_TASK);
+  const xpAmount = parseInt(getSetting("xp_per_task", config.XP_PER_TASK));
+  const xpResult = addXP(userId, xpAmount);
 
   // Commission parrainage
   if (user && user.referred_by) {
@@ -617,14 +621,15 @@ function verifyTaskCompletion(taskId, userId, forceApprove = false) {
 
   // Vérifier si tâche terminée
   const updatedTask = getTask(taskId);
-  if (updatedTask && updatedTask.current_completions >= updatedTask.max_completions) {
+  const taskJustCompleted = updatedTask && updatedTask.current_completions >= updatedTask.max_completions;
+  if (taskJustCompleted) {
     updateTaskStatus(taskId, "completed");
   }
 
   updateDailyStats("tasks_completed", 1);
   updateDailyStats("total_earned", reward);
 
-  return { success: true, reward };
+  return { success: true, reward, levelUp: xpResult, taskCompleted: taskJustCompleted, task };
 }
 
 function rejectTaskCompletion(completionId, adminNote = "") {
@@ -1168,7 +1173,9 @@ function resetDailyTasksIfNeeded(userId) {
   if (!user) return;
   const today = new Date().toISOString().split("T")[0];
   if (user.daily_tasks_reset !== today) {
-    db.prepare("UPDATE users SET daily_tasks_done = 0, daily_tasks_reset = ? WHERE user_id = ?").run(today, userId);
+    const dailySpins = parseInt(getSetting("daily_free_spins", config.SPIN_WHEEL.daily_free_spins || 1));
+    db.prepare("UPDATE users SET daily_tasks_done = 0, daily_tasks_reset = ?, free_spins = ? WHERE user_id = ?")
+      .run(today, dailySpins, userId);
   }
 }
 

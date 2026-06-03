@@ -525,7 +525,13 @@ function approveTask(taskId, adminNote = "") {
 function rejectTask(taskId, adminNote = "") {
   const task = getTask(taskId);
   if (task) {
-    updateBalance(task.creator_id, task.budget, "task_refund", `Tâche rejetée: ${task.title}`);
+    // Le budget a été débité depuis deposit_balance via debitSmart — on rembourse dans deposit_balance
+    const creator = getUser(task.creator_id);
+    if (creator) {
+      const newDep = Math.round(((creator.deposit_balance || 0) + task.budget) * 10000) / 10000;
+      db.prepare("UPDATE users SET deposit_balance = ? WHERE user_id = ?").run(newDep, task.creator_id);
+      addTransaction(task.creator_id, "task_refund", task.budget, `Tâche rejetée: ${task.title}`);
+    }
     db.prepare("UPDATE tasks SET status = 'rejected', admin_note = ? WHERE task_id = ?").run(adminNote, taskId);
   }
 }
@@ -610,13 +616,23 @@ function verifyTaskCompletion(taskId, userId, forceApprove = false) {
     reward = Math.round((reward * (1 + bonusPercent / 100)) * 10000) / 10000;
   }
 
-  // Marquer comme vérifié — décrémenter le budget avec la récompense originale (pas VIP)
-  // Le bonus VIP est payé par la plateforme, pas par le créateur de la campagne
-  db.prepare("UPDATE task_completions SET status = 'verified', verified_at = CURRENT_TIMESTAMP WHERE completion_id = ?").run(completion.completion_id);
-  db.prepare("UPDATE tasks SET current_completions = current_completions + 1, budget_remaining = budget_remaining - ? WHERE task_id = ?").run(completion.reward + task.platform_fee, taskId);
-  db.prepare("UPDATE users SET tasks_completed = tasks_completed + 1, daily_tasks_done = daily_tasks_done + 1 WHERE user_id = ?").run(userId);
+  // Mise à jour atomique — vérifie budget et quota, refuse si épuisés entre-temps
+  const claimed = db.transaction(() => {
+    const t = getTask(taskId);
+    if (!t || t.status !== "active") return false;
+    if (t.current_completions >= t.max_completions) return false;
+    const cost = completion.reward + (t.platform_fee || 0);
+    if ((t.budget_remaining || 0) < cost) return false;
 
-  // Créditer l'utilisateur
+    db.prepare("UPDATE task_completions SET status = 'verified', verified_at = CURRENT_TIMESTAMP WHERE completion_id = ?").run(completion.completion_id);
+    db.prepare("UPDATE tasks SET current_completions = current_completions + 1, budget_remaining = budget_remaining - ? WHERE task_id = ?").run(cost, taskId);
+    db.prepare("UPDATE users SET tasks_completed = tasks_completed + 1, daily_tasks_done = daily_tasks_done + 1 WHERE user_id = ?").run(userId);
+    return true;
+  })();
+
+  if (!claimed) return { success: false, reason: "budget_exhausted" };
+
+  // Créditer l'utilisateur (hors transaction car updateBalance gère ses propres erreurs)
   updateBalance(userId, reward, "task_reward", `Tâche: ${task.title}`, taskId);
   const xpAmount = parseInt(getSetting("xp_per_task", config.XP_PER_TASK));
   const xpResult = addXP(userId, xpAmount);
@@ -702,7 +718,10 @@ function confirmDeposit(depositId, txHash = "", autoDetected = false) {
 }
 
 function rejectDeposit(depositId, adminNote = "") {
+  const dep = db.prepare("SELECT * FROM deposits WHERE deposit_id = ?").get(depositId);
+  if (!dep || dep.status !== "pending") return null;
   db.prepare("UPDATE deposits SET status = 'failed', admin_note = ? WHERE deposit_id = ?").run(adminNote, depositId);
+  return dep;
 }
 
 function getPendingDeposits() {
@@ -756,6 +775,7 @@ function createWithdrawal(userId, method, amount, walletAddress) {
 function approveWithdrawal(withdrawalId, txHash = "") {
   const wd = db.prepare("SELECT * FROM withdrawals WHERE withdrawal_id = ?").get(withdrawalId);
   if (!wd) return null;
+  if (wd.status !== "pending") return null; // prevent double-pay
 
   db.prepare("UPDATE withdrawals SET status = 'approved', tx_hash = ?, processed_at = CURRENT_TIMESTAMP WHERE withdrawal_id = ?").run(txHash, withdrawalId);
   db.prepare("UPDATE users SET total_withdrawn = total_withdrawn + ? WHERE user_id = ?").run(wd.amount, wd.user_id);
@@ -833,27 +853,29 @@ function getActiveGiveaways() {
 }
 
 function enterGiveaway(giveawayId, userId, tickets = 1) {
-  const giveaway = getGiveaway(giveawayId);
-  if (!giveaway || giveaway.status !== "active") return { success: false, reason: "not_active" };
-  if (new Date(giveaway.ends_at) < new Date()) return { success: false, reason: "ended" };
-  if (giveaway.max_participants && giveaway.current_participants >= giveaway.max_participants) {
-    return { success: false, reason: "full" };
-  }
+  return db.transaction(() => {
+    const giveaway = getGiveaway(giveawayId);
+    if (!giveaway || giveaway.status !== "active") return { success: false, reason: "not_active" };
+    if (new Date(giveaway.ends_at) < new Date()) return { success: false, reason: "ended" };
+    if (giveaway.max_participants && giveaway.current_participants >= giveaway.max_participants) {
+      return { success: false, reason: "full" };
+    }
 
-  // Vérifier si déjà inscrit
-  const existing = db.prepare("SELECT * FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?").get(giveawayId, userId);
-  if (existing) return { success: false, reason: "already_entered" };
+    // Vérifier si déjà inscrit (dans la transaction pour éviter la race condition)
+    const existing = db.prepare("SELECT * FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?").get(giveawayId, userId);
+    if (existing) return { success: false, reason: "already_entered" };
 
-  // Payer si nécessaire
-  if (giveaway.entry_type === "paid" && giveaway.entry_cost > 0) {
-    const paid = updateBalance(userId, -giveaway.entry_cost * tickets, "giveaway_entry", `Participation concours: ${giveaway.title}`);
-    if (!paid) return { success: false, reason: "insufficient_balance" };
-  }
+    // Payer si nécessaire
+    if (giveaway.entry_type === "paid" && giveaway.entry_cost > 0) {
+      const paid = updateBalance(userId, -giveaway.entry_cost * tickets, "giveaway_entry", `Participation concours: ${giveaway.title}`);
+      if (!paid) return { success: false, reason: "insufficient_balance" };
+    }
 
-  db.prepare("INSERT INTO giveaway_entries (giveaway_id, user_id, tickets) VALUES (?, ?, ?)").run(giveawayId, userId, tickets);
-  db.prepare("UPDATE giveaways SET current_participants = current_participants + 1 WHERE giveaway_id = ?").run(giveawayId);
+    db.prepare("INSERT INTO giveaway_entries (giveaway_id, user_id, tickets) VALUES (?, ?, ?)").run(giveawayId, userId, tickets);
+    db.prepare("UPDATE giveaways SET current_participants = current_participants + 1 WHERE giveaway_id = ?").run(giveawayId);
 
-  return { success: true };
+    return { success: true };
+  })();
 }
 
 function drawGiveaway(giveawayId) {

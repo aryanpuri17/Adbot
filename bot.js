@@ -39,7 +39,19 @@ try {
     db.db.prepare("ALTER TABLE users ADD COLUMN daily_streak INTEGER DEFAULT 0").run();
     console.log("✅ Migration: daily_streak ajouté");
   }
-} catch (e) { console.error("Migration error:", e.message); }
+} catch (e) { console.error("Migration users error:", e.message); }
+
+try {
+  const taskCols = db.db.prepare("PRAGMA table_info(tasks)").all();
+  if (!taskCols.find(c => c.name === "allow_vpn")) {
+    db.db.prepare("ALTER TABLE tasks ADD COLUMN allow_vpn INTEGER DEFAULT 1").run();
+    console.log("✅ Migration: tasks.allow_vpn ajouté");
+  }
+  if (!taskCols.find(c => c.name === "allow_rerun")) {
+    db.db.prepare("ALTER TABLE tasks ADD COLUMN allow_rerun INTEGER DEFAULT 0").run();
+    console.log("✅ Migration: tasks.allow_rerun ajouté");
+  }
+} catch (e) { console.error("Migration tasks error:", e.message); }
 
 // ─────────────────────────────────────────────
 //  BALANCE SÉPARÉE (retirable + dépôt)
@@ -183,9 +195,8 @@ function KBI(rows) { return { inline_keyboard: rows }; }
 function KB_MAIN(uid) {
   const rows = [
     ["💰 Solde",     "📋 Tâches"],
-    ["🏆 Concours",  "🎁 Bonus du jour"],
-    ["👥 Parrainer", "👤 Profil"],
-    ["💬 Support"],
+    ["🏆 Concours",  "👥 Parrainer"],
+    ["👤 Profil",    "💬 Support"],
   ];
   if (isAdmin(uid)) rows.push(["👑 Admin"]);
   return KB(rows);
@@ -393,10 +404,6 @@ bot.on("callback_query", async (q) => {
     return sendHome(cid, db.getUser(uid));
   }
 
-  if (data === "claim_daily_bonus") {
-    return claimBonus(cid, uid);
-  }
-
   // ─── Tâches ───
   if (data.startsWith("start_task_"))    return handleStartTask(cid, uid, parseInt(data.replace("start_task_","")), user);
   if (data.startsWith("verify_task_"))   return handleVerifyTask(cid, uid, parseInt(data.replace("verify_task_","")), user);
@@ -554,32 +561,171 @@ bot.on("callback_query", async (q) => {
   // ─── Créer Campagne ───
   if (data.startsWith("ct_type_")) {
     const type = data.replace("ct_type_","");
-    setState(uid, "ct_link", { type });
-    const typeLabel = type === "channel" ? "canal" : type === "group" ? "groupe" : "bot";
+    const typeNames = { channel: "Canal Telegram", group: "Groupe Telegram", bot: "Bot Telegram", miniapp: "Mini App" };
+    setState(uid, "ct_title", { type });
     return bot.sendMessage(cid,
-      `➕ <b>NOUVELLE CAMPAGNE ${typeLabel.toUpperCase()}</b>\n\n` +
-      `🔗 Envoie le lien Telegram de ton ${typeLabel} :\n\n` +
-      `Exemple : <code>https://t.me/Mon${typeLabel === "canal" ? "Canal" : typeLabel === "groupe" ? "Groupe" : "Bot"}</code>`,
+      `➕ <b>${typeNames[type] || type}</b>\n\n` +
+      `🖌️ <b>Étape 1 — Titre de ta campagne</b>\n\n` +
+      `Donne un titre court et accrocheur à ton annonce :`,
       { parse_mode: "HTML", reply_markup: KB_CANCEL });
   }
 
-  // Choix de la durée (canal/groupe)
+  // Choix de la durée (canal/groupe) → passe à géo ciblage
   if (data.startsWith("ct_dur_")) {
     const hours = parseInt(data.replace("ct_dur_",""));
     const st    = getState(uid);
     if (!st) return;
     st.data.durationHours = hours;
-    const minKey = `min_price_${hours}h`;
+    setState(uid, "ct_geo", st.data);
+    return bot.sendMessage(cid,
+      `🌍 <b>Étape 5 — Ciblage géographique</b>\n\n` +
+      `Entre les codes pays séparés par des virgules.\n` +
+      `Exemple : <code>FR, BE, CH, CA</code>\n\n` +
+      `Appuie sur ⏩ Skip pour cibler le monde entier.`,
+      { parse_mode: "HTML", reply_markup: KBI([[{ text: "⏩ Skip — Monde entier", callback_data: "ct_geo_skip" }], [{ text: "❌ Annuler", callback_data: "ct_cancel" }]]) });
+  }
+
+  // Géo : skip
+  if (data === "ct_geo_skip") {
+    const st = getState(uid);
+    if (!st) return;
+    st.data.geoCountries = null;
+    setState(uid, "ct_vpn", st.data);
+    const isChannelGroup = st.data.type === "channel" || st.data.type === "group";
+    const stepVpn = isChannelGroup ? 6 : 5;
+    return bot.sendMessage(cid,
+      `🔒 <b>Étape ${stepVpn} — Utilisateurs VPN</b>\n\n` +
+      `Veux-tu afficher ta campagne aux utilisateurs qui utilisent un VPN ?`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "✅ Autoriser VPN", callback_data: "ct_vpn_allow" }],
+        [{ text: "🚫 Bloquer VPN",   callback_data: "ct_vpn_disallow" }],
+      ]) });
+  }
+
+  // VPN preference
+  if (data === "ct_vpn_allow" || data === "ct_vpn_disallow") {
+    const st = getState(uid);
+    if (!st) return;
+    st.data.allowVpn = data === "ct_vpn_allow" ? 1 : 0;
+    setState(uid, "ct_rerun", st.data);
+    const isChannelGroup = st.data.type === "channel" || st.data.type === "group";
+    const stepRerun = isChannelGroup ? 7 : 6;
+    return bot.sendMessage(cid,
+      `🔄 <b>Étape ${stepRerun} — Répétition</b>\n\n` +
+      `Veux-tu permettre aux mêmes utilisateurs de refaire cette tâche après 24h ?`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "✅ Oui — autoriser après 24h", callback_data: "ct_rerun_yes" }],
+        [{ text: "🚫 Non — une seule fois",       callback_data: "ct_rerun_no"  }],
+      ]) });
+  }
+
+  // Rerun preference → passe à récompense
+  if (data === "ct_rerun_yes" || data === "ct_rerun_no") {
+    const st = getState(uid);
+    if (!st) return;
+    st.data.allowRerun = data === "ct_rerun_yes" ? 1 : 0;
+    const type = st.data.type;
+    const isChannelGroup = type === "channel" || type === "group";
+    const stepReward = isChannelGroup ? 8 : 7;
+    if (type === "bot" || type === "miniapp") {
+      const seconds = parseInt(db.getSetting("bot_wait_seconds", "30"));
+      st.data.durationSeconds = seconds;
+      const minPrice = parseFloat(db.getSetting("min_price_bot", "0.001"));
+      const realMin = Math.max(minPrice, 0.001);
+      setState(uid, "ct_reward", st.data);
+      return bot.sendMessage(cid,
+        `💰 <b>Étape ${stepReward} — Coût par utilisateur ($)</b>\n\n` +
+        `⏱ Temps d'attente : <b>${seconds}s</b>\n` +
+        `Minimum : <b>${realMin.toFixed(4)}$</b>\n\n` +
+        `Envoie le montant à payer par utilisateur :`,
+        { parse_mode: "HTML", reply_markup: KB_CANCEL });
+    }
+    // channel/group : durée déjà choisie
+    const minKey = `min_price_${st.data.durationHours}h`;
     const minPrice = parseFloat(db.getSetting(minKey, "0.001"));
     const realMin = Math.max(minPrice, 0.001);
-    const minTxt = realMin < 0.01 ? realMin.toFixed(4) : realMin.toFixed(2);
     setState(uid, "ct_reward", st.data);
     return bot.sendMessage(cid,
-      `💰 <b>Récompense par personne ($)</b>\n\n` +
-      `Durée choisie : <b>${hours}h</b>\n` +
-      `Minimum : <b>${minTxt}$</b>\n\n` +
-      `Envoie le montant :`,
+      `💰 <b>Étape ${stepReward} — Coût par utilisateur ($)</b>\n\n` +
+      `⏱ Durée abonnement : <b>${st.data.durationHours}h</b>\n` +
+      `Minimum : <b>${realMin.toFixed(4)}$</b>\n\n` +
+      `Envoie le montant à payer par utilisateur :`,
       { parse_mode: "HTML", reply_markup: KB_CANCEL });
+  }
+
+  // Annuler campagne depuis inline
+  if (data === "ct_cancel") {
+    clearState(uid);
+    return bot.sendMessage(cid, "❌ Création annulée.", { reply_markup: KB_MAIN(uid) });
+  }
+
+  // Confirmation finale campagne
+  if (data === "ct_confirm_yes") {
+    const st = getState(uid);
+    if (!st || st.state !== "ct_confirm") return;
+    const d = st.data;
+    const user2 = db.getUser(uid);
+    if (!debitSmart(uid, d.realBudget, "task_creation", `Campagne: ${d.title}`)) {
+      clearState(uid);
+      return bot.sendMessage(cid, "❌ Solde insuffisant.", { reply_markup: KB_MAIN(uid) });
+    }
+    const descText = (d.type === "bot" || d.type === "miniapp")
+      ? `Temps d'attente : ${d.durationSeconds}s`
+      : `Reste abonné ${d.durationHours}h minimum`;
+    let taskId;
+    try {
+      const ins = db.db.prepare(`
+        INSERT INTO tasks (creator_id, type, title, description, link, chat_id, proof_required, proof_instructions, reward, platform_fee, max_completions, budget, budget_remaining, countries, allow_vpn, allow_rerun, min_level, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+      `).run(
+        uid, d.type, d.title, d.campaignDescription + "\n" + descText,
+        d.link, d.chatId || null,
+        d.reward, d.platformFee, d.maxC, d.realBudget, d.realBudget,
+        d.geoCountries || null, d.allowVpn ?? 1, d.allowRerun ?? 0,
+        d.expiresAt
+      );
+      taskId = ins.lastInsertRowid;
+      db.db.prepare("UPDATE users SET tasks_created = tasks_created + 1 WHERE user_id = ?").run(uid);
+    } catch (e) {
+      console.error("Task insert error:", e.message);
+      clearState(uid);
+      return bot.sendMessage(cid, "❌ Erreur lors de la création.", { reply_markup: KB_MAIN(uid) });
+    }
+    clearState(uid);
+    const durationTxt = d.type === "bot" || d.type === "miniapp"
+      ? `⏱ ${d.durationSeconds}s d'attente`
+      : `⏱ ${d.durationHours}h d'abonnement`;
+    bot.sendMessage(cid,
+      `🎉 <b>Campagne soumise !</b>\n\n` +
+      `🆔 ID : <b>#${taskId}</b>\n` +
+      `📌 ${esc(d.title)}\n` +
+      `💰 ${fmt(d.reward)}/personne\n` +
+      `🎯 ${d.maxC} participants max\n` +
+      `💵 Budget : ${fmt(d.realBudget)}\n` +
+      `${durationTxt}\n\n` +
+      `⏳ En attente de validation par l'admin.`,
+      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    for (const aid of config.ADMIN_IDS) {
+      bot.sendMessage(aid,
+        `📋 <b>Nouvelle campagne #${taskId}</b>\n\n` +
+        `👤 ${esc(user2?.first_name || uid)} (${uid})\n` +
+        `📌 ${esc(d.title)}\n` +
+        `📄 ${esc(d.campaignDescription || "")}\n` +
+        `💰 ${fmt(d.reward)} × ${d.maxC} personnes\n` +
+        `${durationTxt}\n` +
+        `🌍 ${d.geoCountries || "Monde entier"} · VPN: ${d.allowVpn ? "✅" : "🚫"} · Rerun: ${d.allowRerun ? "✅" : "🚫"}\n` +
+        `🔗 ${esc(d.link)}`,
+        { parse_mode: "HTML", reply_markup: KBI([[
+          { text: "✅ Approuver", callback_data: `apr_task_${taskId}` },
+          { text: "❌ Rejeter",   callback_data: `rej_task_${taskId}` }
+        ]]) }).catch(() => {});
+    }
+    return;
+  }
+
+  if (data === "ct_confirm_no") {
+    clearState(uid);
+    return bot.sendMessage(cid, "❌ Création annulée.", { reply_markup: KB_MAIN(uid) });
   }
 
   // ─── Gestion campagnes utilisateur ───
@@ -865,10 +1011,6 @@ function sendHome(cid, user) {
 
   const solde     = (user.balance || 0) + (user.deposit_balance || 0);
   const streak    = user.daily_streak || 0;
-  const lastBonus = user.last_daily_bonus ? new Date(user.last_daily_bonus) : null;
-  const bonusReady = !lastBonus || new Date().toDateString() !== lastBonus.toDateString();
-
-  const bonusTxt  = bonusReady ? `\n\n🎁 <b>Bonus du jour disponible !</b>` : "";
   const streakTxt = streak > 0 ? `\n🔥 Série : <b>${streak} jour${streak > 1 ? "s" : ""}</b>` : "";
   const homeExtra = db.getSetting("home_extra_text", "");
   const extraTxt  = homeExtra ? `\n\n${homeExtra}` : "";
@@ -878,7 +1020,7 @@ function sendHome(cid, user) {
     `💰 Solde : <b>${fmt(solde)}</b>\n\n` +
     `📋 Tâches aujourd'hui : <b>${user.daily_tasks_done}/${maxT}</b>\n` +
     `👥 Filleuls : <b>${user.referral_count}</b>` +
-    streakTxt + bonusTxt + extraTxt,
+    streakTxt + extraTxt,
     { parse_mode: "HTML", reply_markup: KB_MAIN(user.user_id) });
 }
 
@@ -1307,78 +1449,6 @@ async function showReferral(cid, user) {
 // ─────────────────────────────────────────────
 //  BONUS QUOTIDIEN
 // ─────────────────────────────────────────────
-
-function claimBonus(cid, uid) {
-  const r = db.claimDailyBonus(uid);
-  if (!r || !r.success) {
-    const u = db.getUser(uid);
-    const lastB = u && u.last_daily_bonus ? new Date(u.last_daily_bonus) : null;
-    const hoursLeft = lastB ? Math.max(0, Math.ceil((lastB.getTime() + 86400000 - Date.now()) / 3600000)) : 0;
-    return bot.sendMessage(cid, `⏰ <b>Déjà réclamé !</b>\n\nProchain bonus dans <b>${hoursLeft}h</b>`, { parse_mode: "HTML" });
-  }
-  const nu = db.getUser(uid);
-  const streakTxt = r.streak > 1 ? `\n🔥 Série : <b>${r.streak} jours</b>${r.multiplier > 1 ? ` · ×${r.multiplier}` : ""}` : "";
-  bot.sendMessage(cid,
-    `🎁 <b>Bonus réclamé !</b>\n\n` +
-    `💰 +<b>${fmt(r.amount)}</b> ajouté à tes gains !${streakTxt}\n\n` +
-    `💰 Nouveau solde : <b>${fmt(nu.balance)}</b>`,
-    { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
-}
-
-function showDailyBonus(cid, uid, user) {
-  user = db.getUser(uid);
-  const lastBonus = user.last_daily_bonus ? new Date(user.last_daily_bonus) : null;
-  const now = new Date();
-  const alreadyClaimed = lastBonus && now.toDateString() === lastBonus.toDateString();
-  const streak = user.daily_streak || 0;
-
-  const minB = parseFloat(db.getSetting("daily_bonus_min", config.DAILY_BONUS_MIN));
-  const maxB = parseFloat(db.getSetting("daily_bonus_max", config.DAILY_BONUS_MAX));
-  let multiplier = 1;
-  if (streak >= 30) multiplier = 2.0;
-  else if (streak >= 14) multiplier = 1.75;
-  else if (streak >= 7) multiplier = 1.5;
-  else if (streak >= 3) multiplier = 1.25;
-
-  let streakLabel = "";
-  if (streak >= 30) streakLabel = "💎 Légendaire (x2.0)";
-  else if (streak >= 14) streakLabel = "🥇 Or (x1.75)";
-  else if (streak >= 7) streakLabel = "🥈 Argent (x1.5)";
-  else if (streak >= 3) streakLabel = "🥉 Bronze (x1.25)";
-  else streakLabel = "🆕 Commence une série !";
-
-  const milestones = [3, 7, 14, 30];
-  const nextMilestone = milestones.find(m => m > streak) || 30;
-
-  let timeTxt = "";
-  if (alreadyClaimed && lastBonus) {
-    const nextBonusTime = new Date(lastBonus);
-    nextBonusTime.setDate(nextBonusTime.getDate() + 1);
-    nextBonusTime.setHours(0, 0, 0, 0);
-    const msLeft = Math.max(0, nextBonusTime.getTime() - now.getTime());
-    const h = Math.floor(msLeft / 3600000);
-    const m = Math.floor((msLeft % 3600000) / 60000);
-    timeTxt = `\n⏰ Prochain bonus dans : <b>${h}h ${m}min</b>`;
-  }
-
-  const baseRange = `${(minB * multiplier).toFixed(4)}$ – ${(maxB * multiplier).toFixed(4)}$`;
-
-  bot.sendMessage(cid,
-    `🎁 <b>BONUS QUOTIDIEN</b>\n\n` +
-    `🔥 Série actuelle : <b>${streak} jour${streak > 1 ? "s" : ""}</b>\n` +
-    `${streakLabel}\n\n` +
-    `💰 Bonus aujourd'hui : <b>${baseRange}</b>\n` +
-    (multiplier > 1 ? `✨ Multiplicateur : <b>×${multiplier}</b>\n` : "") +
-    `📈 Prochain palier : <b>${nextMilestone} jours</b>\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    (alreadyClaimed
-      ? `✅ Déjà réclamé aujourd'hui.${timeTxt}`
-      : `🎯 <b>Ton bonus t'attend !</b>`),
-    { parse_mode: "HTML",
-      reply_markup: alreadyClaimed
-        ? KB([["🏠 Accueil"]])
-        : KBI([[{ text: "🎁 Réclamer mon bonus !", callback_data: "claim_daily_bonus" }]]) });
-}
 
 function showVipShop(cid, uid) {
   const user = db.getUser(uid);
@@ -1973,8 +2043,6 @@ bot.on("message", async (msg) => {
   if (text === "🏆 Concours")    { clearState(uid); return showGiveaways(cid); }
   if (text === "👥 Parrainer")   { clearState(uid); return showReferral(cid, user); }
   if (text === "👥 Parrainage")  { clearState(uid); return showReferral(cid, user); }
-  if (text === "🎁 Bonus du jour"){ clearState(uid); return showDailyBonus(cid, uid, user); }
-  if (text === "🎁 Bonus")       { clearState(uid); return showDailyBonus(cid, uid, user); }
   if (text === "👤 Profil")      { clearState(uid); return showProfile(cid, uid); }
   if (text === "📊 Profil")      { clearState(uid); return showProfile(cid, uid); }
   if (text === "💬 Support")     { clearState(uid); return showSupport(cid, uid); }
@@ -2094,7 +2162,34 @@ bot.on("message", async (msg) => {
       ]) });
   }
 
-  // Créer campagne — FSM (NOUVELLE VERSION)
+  // ─── Campagne FSM ───
+
+  if (s === "ct_title") {
+    if (text.length < 3 || text.length > 100) {
+      return bot.sendMessage(cid, "❌ Titre entre 3 et 100 caractères.");
+    }
+    setState(uid, "ct_description", { ...data, title: text });
+    return bot.sendMessage(cid,
+      `📄 <b>Étape 2 — Description de ta campagne</b>\n\n` +
+      `Décris ta campagne en quelques lignes (ce que tu offres, pourquoi rejoindre, etc.)\n\n` +
+      `Maximum 500 caractères :`,
+      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+  }
+
+  if (s === "ct_description") {
+    if (text.length < 5 || text.length > 500) {
+      return bot.sendMessage(cid, "❌ Description entre 5 et 500 caractères.");
+    }
+    const type = data.type;
+    const typeLabel = type === "channel" ? "canal" : type === "group" ? "groupe" : type === "bot" ? "bot" : "mini app";
+    setState(uid, "ct_link", { ...data, campaignDescription: text });
+    return bot.sendMessage(cid,
+      `🔗 <b>Étape 3 — Lien de ton ${typeLabel}</b>\n\n` +
+      `Envoie le lien Telegram complet :\n\n` +
+      `Exemple : <code>https://t.me/Mon${type === "channel" ? "Canal" : type === "group" ? "Groupe" : "Bot"}</code>`,
+      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+  }
+
   if (s === "ct_link") {
     const type = data.type;
     const verif = await verifyChatType(text, type);
@@ -2107,11 +2202,9 @@ bot.on("message", async (msg) => {
       if (verif.reason === "not_found")   reason = `❌ Lien introuvable. Vérifie l'orthographe.`;
       if (verif.reason === "invalid_link")reason = `❌ Format de lien invalide.`;
       return bot.sendMessage(cid,
-        `${reason}\n\nEnvoie un lien valide vers un <b>${typeLabel}</b> :`,
+        `${reason}\n\nEnvoie un lien valide :`,
         { parse_mode: "HTML", reply_markup: KB_CANCEL });
     }
-
-    // Pour canal/groupe UNIQUEMENT : vérifier que le bot est admin
     if (type === "channel" || type === "group") {
       const isAdminOK = await verifyBotIsAdmin(verif.username);
       if (!isAdminOK) {
@@ -2123,68 +2216,66 @@ bot.on("message", async (msg) => {
           `🔐 C'est obligatoire pour vérifier les abonnements.`,
           { parse_mode: "HTML", reply_markup: KB_CANCEL });
       }
+      // Canal/Groupe : choisir la durée (étape 4)
+      setState(uid, "ct_duration", { ...data, link: text.trim(), chatId: "@" + verif.username });
+      const durations = [1, 12, 24, 48];
+      const dRows = durations.map(h => {
+        const price = parseFloat(db.getSetting(`min_price_${h}h`, "0.001"));
+        const priceFmt = price < 0.01 ? price.toFixed(4) : price.toFixed(2);
+        return [{ text: `⏱ ${h}h — min ${priceFmt}$/personne`, callback_data: `ct_dur_${h}` }];
+      });
+      return bot.sendMessage(cid,
+        `✅ <b>Lien vérifié !</b>\n\n` +
+        `⏱ <b>Étape 4 — Durée d'abonnement</b>\n\n` +
+        `Combien de temps les utilisateurs doivent rester abonnés ?`,
+        { parse_mode: "HTML", reply_markup: KBI(dRows) });
     }
-    // Bot et Mini App : pas de vérification admin (impossible)
-
-    // Tout OK — STOCKER le lien complet original (sans le couper)
-    setState(uid, "ct_title", { ...data, link: text.trim(), chatId: "@" + verif.username });
+    // Bot / Mini App → passe à géo ciblage (étape 4)
+    setState(uid, "ct_geo", { ...data, link: text.trim(), chatId: "@" + verif.username });
     return bot.sendMessage(cid,
-      `✅ <b>Lien vérifié !</b>\n\n📝 Envoie maintenant le <b>titre</b> de ta campagne :`,
-      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+      `✅ <b>Lien vérifié !</b>\n\n` +
+      `🌍 <b>Étape 4 — Ciblage géographique</b>\n\n` +
+      `Entre les codes pays séparés par des virgules.\n` +
+      `Exemple : <code>FR, BE, CH, CA</code>\n\n` +
+      `Appuie sur ⏩ Skip pour cibler le monde entier.`,
+      { parse_mode: "HTML", reply_markup: KBI([[{ text: "⏩ Skip — Monde entier", callback_data: "ct_geo_skip" }], [{ text: "❌ Annuler", callback_data: "ct_cancel" }]]) });
   }
 
-  if (s === "ct_title") {
-    if (text.length < 3 || text.length > 100) {
-      return bot.sendMessage(cid, "❌ Titre entre 3 et 100 caractères.");
+  if (s === "ct_geo") {
+    const countries = text.toUpperCase().replace(/\s+/g, "").split(",").filter(c => /^[A-Z]{2}$/.test(c));
+    if (!countries.length) {
+      return bot.sendMessage(cid, "❌ Codes invalides. Utilise le format : FR, BE, CH\nOu appuie sur ⏩ Skip.", { reply_markup: KBI([[{ text: "⏩ Skip — Monde entier", callback_data: "ct_geo_skip" }]]) });
     }
-    const type = data.type;
-    // Pour bot/miniapp : pas de durée, juste un temps d'attente fixe
-    if (type === "bot" || type === "miniapp") {
-      const seconds = parseInt(db.getSetting("bot_wait_seconds", "30"));
-      const minPrice = parseFloat(db.getSetting("min_price_bot", "0.001"));
-      const realMin = Math.max(minPrice, 0.001);
-      const minTxt = realMin < 0.01 ? realMin.toFixed(4) : realMin.toFixed(2);
-      setState(uid, "ct_reward", { ...data, title: text, durationSeconds: seconds });
-      return bot.sendMessage(cid,
-        `💰 <b>Récompense par personne ($)</b>\n\n` +
-        `⏱ Temps d'attente : <b>${seconds}s</b>\n` +
-        `Minimum : <b>${minTxt}$</b>\n\n` +
-        `Envoie le montant :`,
-        { parse_mode: "HTML", reply_markup: KB_CANCEL });
-    }
-
-    // Canal/Groupe : afficher les boutons de durée
-    setState(uid, "ct_duration", { ...data, title: text });
-    const durations = [1, 12, 24, 48];
-    const rows = durations.map(h => {
-      const price = parseFloat(db.getSetting(`min_price_${h}h`, "0.001"));
-      const priceFmt = price < 0.01 ? price.toFixed(4) : price.toFixed(2);
-      return [{ text: `⏱ ${h}h — min ${priceFmt}$/personne`, callback_data: `ct_dur_${h}` }];
-    });
+    const isChannelGroup = data.type === "channel" || data.type === "group";
+    const stepVpn = isChannelGroup ? 6 : 5;
+    setState(uid, "ct_vpn", { ...data, geoCountries: countries.join(",") });
     return bot.sendMessage(cid,
-      `⏱ <b>Durée d'abonnement</b>\n\n` +
-      `Combien de temps les users doivent rester abonnés ?`,
-      { parse_mode: "HTML", reply_markup: KBI(rows) });
+      `🔒 <b>Étape ${stepVpn} — Utilisateurs VPN</b>\n\n` +
+      `Veux-tu afficher ta campagne aux utilisateurs qui utilisent un VPN ?`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "✅ Autoriser VPN",  callback_data: "ct_vpn_allow" }],
+        [{ text: "🚫 Bloquer VPN",    callback_data: "ct_vpn_disallow" }],
+      ]) });
   }
 
   if (s === "ct_reward") {
     const reward = parseFloat(text);
     const type = data.type;
-    let minKey;
-    if (type === "bot" || type === "miniapp") minKey = "min_price_bot";
-    else minKey = `min_price_${data.durationHours}h`;
+    const minKey = (type === "bot" || type === "miniapp") ? "min_price_bot" : `min_price_${data.durationHours}h`;
     const minPrice = parseFloat(db.getSetting(minKey, "0.001"));
-    // Minimum absolu = 0.001$
     const realMin = Math.max(minPrice, 0.001);
     if (isNaN(reward) || reward < realMin) {
-      return bot.sendMessage(cid, `❌ Minimum : ${realMin.toFixed(4)}$ par personne.`);
+      return bot.sendMessage(cid, `❌ Minimum : ${realMin.toFixed(4)}$ par utilisateur.`);
     }
+    const isChannelGroup = type === "channel" || type === "group";
+    const stepBudget = isChannelGroup ? 9 : 8;
     setState(uid, "ct_budget", { ...data, reward });
     user = db.getUser(uid);
+    const avail = (user.balance || 0) + (user.deposit_balance || 0);
     return bot.sendMessage(cid,
-      `💵 <b>Budget total ($)</b>\n\n` +
-      `Balance : ${fmt(user.balance)}\n` +
-      `Récompense : ${reward}$/personne\n\n` +
+      `💸 <b>Étape ${stepBudget} — Budget total ($)</b>\n\n` +
+      `💰 Solde disponible : <b>${fmt(avail)}</b>\n` +
+      `💵 Coût par utilisateur : <b>${fmt(reward)}</b>\n\n` +
       `Le nombre de participants sera calculé automatiquement.\n\n` +
       `Envoie le budget total :`,
       { parse_mode: "HTML", reply_markup: KB_CANCEL });
@@ -2193,91 +2284,47 @@ bot.on("message", async (msg) => {
   if (s === "ct_budget") {
     const budget = parseFloat(text);
     user = db.getUser(uid);
-    // Frais en POURCENTAGE (20% par défaut, configurable)
     const feePercent = parseFloat(db.getSetting("task_fee_percent", "20"));
-    const feePerUser = data.reward * (feePercent / 100);
-    const totalPerUser = data.reward + feePerUser;
+    const platformFee = Math.round(data.reward * (feePercent / 100) * 10000) / 10000;
+    const totalPerUser = data.reward + platformFee;
     if (isNaN(budget) || budget < totalPerUser) {
-      return bot.sendMessage(cid, `❌ Budget minimum : ${fmt(totalPerUser)} (1 personne).`);
+      return bot.sendMessage(cid, `❌ Budget minimum : ${fmt(totalPerUser)} (1 participant).`);
     }
     const userTotal = (user.balance || 0) + (user.deposit_balance || 0);
     if (budget > userTotal) {
-      return bot.sendMessage(cid, `❌ Solde insuffisant.\n💰 Gains : ${fmt(user.balance)}\n💳 Dépôt : ${fmt(user.deposit_balance || 0)}`, { parse_mode: "HTML" });
+      return bot.sendMessage(cid,
+        `❌ Solde insuffisant.\n💰 Disponible : <b>${fmt(userTotal)}</b>`,
+        { parse_mode: "HTML" });
     }
     const maxC = Math.floor(budget / totalPerUser);
     const realBudget = Math.round(maxC * totalPerUser * 10000) / 10000;
-
-    // Calculer expires_at
-    let expiresAt = null;
-    if (data.type === "channel" || data.type === "group") {
-      // Durée de la tâche = 7 jours (l'utilisateur reste durationHours après chaque clic)
-      expiresAt = new Date(Date.now() + 7 * 24 * 3600000).toISOString();
-    } else {
-      expiresAt = new Date(Date.now() + 30 * 24 * 3600000).toISOString();
-    }
-
-    // Débiter et insérer dans une transaction atomique (rollback automatique si l'INSERT échoue)
-    const feePctInsert = parseFloat(db.getSetting("task_fee_percent", "20"));
-    const platformFeeInsert = Math.round(data.reward * (feePctInsert / 100) * 10000) / 10000;
-    const descText = (data.type === "bot" || data.type === "miniapp")
-      ? `Temps d'attente : ${data.durationSeconds}s`
-      : `Reste abonné ${data.durationHours}h minimum`;
-
-    let taskId;
-    try {
-      db.db.transaction(() => {
-        if (!debitSmart(uid, realBudget, "task_creation", `Campagne: ${data.title}`))
-          throw new Error("debit_failed");
-        const insertResult = db.db.prepare(`
-          INSERT INTO tasks (creator_id, type, title, description, link, chat_id, proof_required, proof_instructions, reward, platform_fee, max_completions, budget, budget_remaining, countries, min_level, expires_at)
-          VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, NULL, 1, ?)
-        `).run(
-          uid, data.type, data.title, descText,
-          data.link, data.chatId || null,
-          data.reward, platformFeeInsert, maxC, realBudget, realBudget, expiresAt
-        );
-        taskId = insertResult.lastInsertRowid;
-        db.db.prepare("UPDATE users SET tasks_created = tasks_created + 1 WHERE user_id = ?").run(uid);
-      })();
-    } catch (e) {
-      if (e.message === "debit_failed")
-        return bot.sendMessage(cid, `❌ Solde insuffisant.\n💰 Gains : ${fmt(user.balance)}\n💳 Dépôt : ${fmt(user.deposit_balance || 0)}`, { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
-      console.error("Task creation error:", e.message);
-      return bot.sendMessage(cid, "❌ Erreur lors de la création.", { reply_markup: KB_MAIN(uid) });
-    }
-
-    clearState(uid);
-    if (!taskId) return bot.sendMessage(cid, "❌ Erreur création.", { reply_markup: KB_MAIN(uid) });
-
-    // Stocker la durée custom dans description (déjà fait)
-    const durationTxt = data.type === "bot"
-      ? `⏱ ${data.durationSeconds}s`
+    const isChannelGroup = data.type === "channel" || data.type === "group";
+    const expiresAt = new Date(Date.now() + (isChannelGroup ? 7 : 30) * 24 * 3600000).toISOString();
+    const durationTxt = (data.type === "bot" || data.type === "miniapp")
+      ? `⏱ ${data.durationSeconds}s d'attente`
       : `⏱ ${data.durationHours}h d'abonnement`;
-
-    bot.sendMessage(cid,
-      `✅ <b>Campagne soumise !</b>\n\n` +
-      `📌 ${esc(data.title)}\n` +
-      `💰 ${fmt(data.reward)}/personne\n` +
-      `🎯 ${maxC} personnes max\n` +
-      `💵 Budget : ${fmt(realBudget)}\n` +
+    const geoTxt = data.geoCountries || "🌍 Monde entier";
+    // Stocker dans l'état pour confirmation
+    setState(uid, "ct_confirm", { ...data, maxC, realBudget, platformFee, expiresAt });
+    return bot.sendMessage(cid,
+      `✅ <b>Confirmer ta campagne</b>\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🖌️ <b>Titre :</b> ${esc(data.title)}\n` +
+      `📄 <b>Description :</b>\n${esc(data.campaignDescription || "")}\n\n` +
+      `🔗 <b>Lien :</b> ${esc(data.link)}\n\n` +
+      `🌍 <b>Ciblage :</b> ${geoTxt}\n` +
+      `🔒 <b>VPN :</b> ${(data.allowVpn ?? 1) ? "✅ Autorisé" : "🚫 Bloqué"}\n` +
+      `🔄 <b>Répétition :</b> ${data.allowRerun ? "✅ Après 24h" : "🚫 Une seule fois"}\n` +
       `${durationTxt}\n\n` +
-      `⏳ En attente de validation par l'admin.`,
-      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
-
-    for (const aid of config.ADMIN_IDS) {
-      bot.sendMessage(aid,
-        `📋 <b>Nouvelle campagne #${taskId}</b>\n\n` +
-        `👤 ${esc(user.first_name)} (${uid})\n` +
-        `📌 ${esc(data.title)}\n` +
-        `💰 ${fmt(data.reward)} × ${maxC} personnes\n` +
-        `${durationTxt}\n` +
-        `🔗 ${esc(data.link)}`,
-        { parse_mode: "HTML", reply_markup: KBI([[
-          { text: "✅ Approuver", callback_data: `apr_task_${taskId}` },
-          { text: "❌ Rejeter",   callback_data: `rej_task_${taskId}` }
-        ]]) }).catch(() => {});
-    }
-    return;
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `💰 <b>Coût par utilisateur :</b> ${fmt(data.reward)}\n` +
+      `💸 <b>Budget total :</b> ${fmt(realBudget)}\n` +
+      `🎯 <b>Participants max :</b> ${maxC}\n\n` +
+      `Confirmes-tu cette campagne ?`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "✅ Confirmer",  callback_data: "ct_confirm_yes" },
+         { text: "❌ Annuler",    callback_data: "ct_confirm_no"  }]
+      ]) });
   }
 
   // Ajout de budget à une campagne existante

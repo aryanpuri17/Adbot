@@ -111,6 +111,15 @@ function creditEarnings(uid, amount, type, description) {
   return true;
 }
 
+// Retourne la limite quotidienne de tâches pour l'utilisateur (VIP-aware)
+function getMaxTasksForUser(user) {
+  if (user && user.vip_level > 0) {
+    const vipMax = parseInt(db.getSetting(`vip_${user.vip_level}_max_tasks`, (config.VIP_LEVELS[user.vip_level] || {}).max_tasks_day || 0));
+    if (vipMax > 0) return vipMax;
+  }
+  return parseInt(db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY));
+}
+
 // Crédite le dépôt (non retirable) — 4 décimales
 function creditDeposit(uid, amount) {
   const u = db.getUser(uid);
@@ -892,7 +901,7 @@ bot.on("callback_query", async (q) => {
       `✅ <b>Dépôt confirmé !</b>\n\n` +
       `💎 ${dep.amount} ${symbol} → <b>+${fmt(usdAmount)}</b>\n\n` +
       `💳 Ajouté à ta balance dépôt.\n` +
-      `📌 Utilisable pour créer des campagnes et jouer aux mini-jeux.\n\n` +
+      `📌 Utilisable pour créer tes campagnes publicitaires.\n\n` +
       `Ton nouveau solde dépôt : <b>${fmt((db.getUser(dep.user_id) || {}).deposit_balance || 0)}</b>`,
       { parse_mode: "HTML" }).catch(() => {});
     return bot.editMessageText((q.message.text || "") + "\n\n✅ CONFIRMÉ", { chat_id: cid, message_id: mid });
@@ -1029,9 +1038,10 @@ bot.on("callback_query", async (q) => {
 
 function sendHome(cid, user) {
   db.resetDailyTasksIfNeeded(user.user_id);
+  db.resetVipIfExpired(user.user_id);
   user = db.getUser(user.user_id);
   const botName = db.getSetting("bot_name", "ADCRYPTON");
-  const maxT    = db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY);
+  const maxT    = getMaxTasksForUser(user);
 
   const solde     = (user.balance || 0) + (user.deposit_balance || 0);
   const streak    = user.daily_streak || 0;
@@ -1053,7 +1063,7 @@ function sendHome(cid, user) {
 // ─────────────────────────────────────────────
 
 function showTasksMenu(cid, user) {
-  const maxT = db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY);
+  const maxT = getMaxTasksForUser(user);
   bot.sendMessage(cid,
     `📋 <b>TÂCHES</b>\n\n` +
     `📅 Aujourd'hui : <b>${user.daily_tasks_done || 0}/${maxT}</b> tâches complétées\n\n` +
@@ -1062,7 +1072,7 @@ function showTasksMenu(cid, user) {
 }
 
 async function showTasksByType(cid, uid, type, user) {
-  const maxT = parseInt(db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY));
+  const maxT = getMaxTasksForUser(user);
   if ((user.daily_tasks_done || 0) >= maxT) {
     return bot.sendMessage(cid, `⏰ <b>Limite atteinte</b>\n\nTu as fait ${maxT}/${maxT} tâches aujourd'hui.\nReviens demain !`, { parse_mode: "HTML" });
   }
@@ -1120,7 +1130,7 @@ async function handleStartTask(cid, uid, taskId, user) {
   // Vérifier la limite quotidienne (contournable via lien direct sans ce check)
   db.resetDailyTasksIfNeeded(uid);
   const freshUser = db.getUser(uid);
-  const maxT = parseInt(db.getSetting("max_tasks_day", config.MAX_TASKS_PER_DAY));
+  const maxT = getMaxTasksForUser(freshUser);
   if ((freshUser.daily_tasks_done || 0) >= maxT) {
     return bot.sendMessage(cid,
       `⏰ <b>Limite atteinte</b>\n\nTu as fait ${maxT}/${maxT} tâches aujourd'hui.\nReviens demain !`,
@@ -1485,7 +1495,7 @@ async function showReferral(cid, user) {
     });
   }
 
-  const shareText = encodeURIComponent(`💰 Gagne de l'argent réel sur Telegram !\n\nRécompenses crypto, tâches simples, jeux. Rejoint maintenant :`);
+  const shareText = encodeURIComponent(`💰 Gagne de l'argent réel sur Telegram !\n\nRécompenses crypto, complète des tâches simples et retire tes gains. Rejoins maintenant :`);
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${shareText}`;
   bot.sendMessage(cid,
     `👥 <b>PARRAINAGE</b>\n\n` +
@@ -2579,11 +2589,24 @@ bot.on("message", async (msg) => {
   if (s === "broadcast" && isAdmin(uid)) {
     clearState(uid);
     const all = db.getAllUsers({ banned: false });
-    let sent = 0;
+    let sent = 0, failed = 0;
+    const bcId = db.db.prepare(
+      "INSERT INTO broadcasts (message, created_by, status) VALUES (?, ?, 'sending')"
+    ).run(text, uid).lastInsertRowid;
     for (const u of all) {
-      try { await bot.sendMessage(u.user_id, `📢 <b>Annonce</b>\n\n${esc(text)}`, { parse_mode: "HTML" }); sent++; await new Promise(r=>setTimeout(r,50)); } catch {}
+      try {
+        await bot.sendMessage(u.user_id, `📢 <b>Annonce</b>\n\n${esc(text)}`, { parse_mode: "HTML" });
+        sent++;
+      } catch {
+        failed++;
+      }
+      await new Promise(r => setTimeout(r, 100));
     }
-    return bot.sendMessage(cid, `✅ Envoyé à ${sent} users.`, { reply_markup: KB_ADMIN });
+    db.db.prepare("UPDATE broadcasts SET sent_count=?, failed_count=?, status='sent', sent_at=CURRENT_TIMESTAMP WHERE broadcast_id=?")
+      .run(sent, failed, bcId);
+    return bot.sendMessage(cid,
+      `✅ <b>Broadcast terminé !</b>\n\n📤 Envoyé : <b>${sent}</b>\n❌ Non reçu : <b>${failed}</b> (bloqué ou inactif)`,
+      { parse_mode: "HTML", reply_markup: KB_ADMIN });
   }
 
   // Admin — modifier solde
@@ -2757,7 +2780,7 @@ payments.startAutoDepositChecker(db, config, async (deposit, usdAmount, tx) => {
       `💎 ${tx.amount} ${symbol} → <b>+${fmt(usdAmount)}</b>\n` +
       `🔗 TX : <code>${tx.txHash}</code>\n\n` +
       `💳 Balance dépôt : <b>${fmt(uAfterDep ? (uAfterDep.deposit_balance || 0) : 0)}</b>\n\n` +
-      `Utilisable pour les mini-jeux et tes campagnes.`,
+      `Utilisable pour tes campagnes publicitaires.`,
       { parse_mode: "HTML" });
   } catch (e) { console.error("Auto dep notif:", e.message); }
 });

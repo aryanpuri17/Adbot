@@ -1151,6 +1151,15 @@ function resetDailyTasksIfNeeded(userId) {
   }
 }
 
+function resetVipIfExpired(userId) {
+  const user = getUser(userId);
+  if (!user || !user.vip_level) return;
+  if (!user.vip_expires_at) return;
+  if (new Date(user.vip_expires_at) < new Date()) {
+    db.prepare("UPDATE users SET vip_level = 0, vip_expires_at = NULL WHERE user_id = ?").run(userId);
+  }
+}
+
 // ============================================
 // EXPORTS
 // ============================================
@@ -1158,7 +1167,7 @@ function resetDailyTasksIfNeeded(userId) {
 module.exports = {
   db,
   // Users
-  getUser, createUser, updateUser, updateBalance, addXP, banUser,
+  getUser, createUser, updateUser, updateBalance, addXP, banUser, resetVipIfExpired,
   getAllUsers, getUserCount, getTopUsers, getUserByReferralCode,
   // Tasks
   createTask, getTask, getActiveTasks, getPendingTasks,

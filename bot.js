@@ -811,12 +811,16 @@ bot.on("callback_query", async (q) => {
     const tid = parseInt(data.replace("apr_task_",""));
     db.approveTask(tid, "OK");
     const t = db.getTask(tid);
-    if (t) bot.sendMessage(t.creator_id,
-      `✅ <b>Campagne approuvée !</b>\n\n` +
-      `📌 <b>${esc(t.title)}</b>\n` +
-      `💰 ${fmt(t.reward)} par personne · ${t.max_completions} participants max\n\n` +
-      `Ta campagne est maintenant visible par tous les utilisateurs.`,
-      { parse_mode: "HTML" }).catch(() => {});
+    if (t) {
+      bot.sendMessage(t.creator_id,
+        `✅ <b>Campagne approuvée !</b>\n\n` +
+        `📌 <b>${esc(t.title)}</b>\n` +
+        `💰 ${fmt(t.reward)} par personne · ${t.max_completions} participants max\n\n` +
+        `Ta campagne est maintenant visible par tous les utilisateurs.`,
+        { parse_mode: "HTML" }).catch(() => {});
+      // Notifier les users en arrière-plan (non bloquant)
+      notifyUsersNewTask(t).catch(e => console.error("Notify task error:", e.message));
+    }
     return bot.editMessageText((q.message.text || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid });
   }
   if (data.startsWith("rej_task_")) {
@@ -1759,6 +1763,51 @@ function showAdminStats(cid) {
     { parse_mode: "HTML", reply_markup: KB_ADMIN });
 }
 
+// ─────────────────────────────────────────────
+//  NOTIFICATIONS NOUVELLES CAMPAGNES
+// ─────────────────────────────────────────────
+
+async function notifyUsersNewTask(task) {
+  const enabled = db.getSetting("task_notify_enabled", "1");
+  if (enabled !== "1") return;
+
+  const maxNotify = parseInt(db.getSetting("task_notify_max", "0")) || 0; // 0 = tous
+
+  const allUsers = db.getAllUsers({ banned: false });
+
+  // IDs des users ayant déjà cette tâche en cours ou complétée
+  const doneSet = new Set(
+    db.db.prepare("SELECT user_id FROM task_completions WHERE task_id=?")
+      .all(task.task_id).map(r => r.user_id)
+  );
+
+  const typeEmoji = { channel: "📢", group: "👥", bot: "🤖", miniapp: "🎮" };
+  const typeLabel = { channel: "Canal", group: "Groupe", bot: "Bot Telegram", miniapp: "Mini App" };
+
+  const notifMsg =
+    `🔔 <b>Nouvelle tâche disponible !</b>\n\n` +
+    `${typeEmoji[task.type] || "📋"} <b>${esc(task.title)}</b>\n` +
+    `💰 Récompense : <b>${fmt(task.reward)}</b>\n` +
+    `🎯 Type : <b>${typeLabel[task.type] || task.type}</b>\n\n` +
+    `⚡ Sois parmi les premiers à la compléter !`;
+
+  let sent = 0;
+  for (const u of allUsers) {
+    if (u.user_id === task.creator_id) continue;
+    if (doneSet.has(u.user_id)) continue;
+    if (maxNotify > 0 && sent >= maxNotify) break;
+
+    bot.sendMessage(u.user_id, notifMsg, {
+      parse_mode: "HTML",
+      reply_markup: KBI([[{ text: "▶️ Faire la tâche maintenant", callback_data: `start_task_${task.task_id}` }]])
+    }).catch(() => {});
+
+    sent++;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  console.log(`📢 Notif nouvelle tâche #${task.task_id} → ${sent} users`);
+}
+
 function botSettings() {
   return [
     { key: "bot_name",              label: "🤖 Nom du bot" },
@@ -1778,6 +1827,8 @@ function botSettings() {
     { key: "min_price_48h",         label: "💰 Min prix 48h" },
     { key: "min_price_bot",         label: "💰 Min prix bot/miniapp" },
     { key: "bot_wait_seconds",      label: "⏱ Attente bot (s)" },
+    { key: "task_notify_enabled",   label: "🔔 Notif nouvelles tâches (1=oui, 0=non)" },
+    { key: "task_notify_max",       label: "🔔 Max users notifiés (0=tous)" },
     { key: "maintenance_mode",      label: "🔧 Maintenance" },
   ];
 }

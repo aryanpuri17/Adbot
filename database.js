@@ -321,26 +321,29 @@ function createUser(userId, username, firstName, lastName, referredBy = null) {
   
   const welcomeBonus = parseFloat(getSetting("welcome_bonus", config.WELCOME_BONUS));
   
-  db.prepare(`
+  const insertResult = db.prepare(`
     INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, balance, referral_code, referred_by)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(userId, username || "", firstName || "", lastName || "", welcomeBonus, referralCode, referredBy);
 
-  if (welcomeBonus > 0) {
-    addTransaction(userId, "welcome_bonus", welcomeBonus, "Bonus de bienvenue");
-  }
+  const isNewUser = insertResult.changes > 0;
 
-  if (referredBy) {
-    const referrer = getUser(referredBy);
-    if (referrer && !referrer.is_banned) {
-      const refBonus = parseFloat(getSetting("referral_bonus", config.REFERRAL_BONUS));
-      updateBalance(referredBy, refBonus, "referral_bonus", `Parrainage: ${firstName}`);
-      db.prepare("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?").run(referredBy);
-      addXP(referredBy, parseInt(getSetting("xp_per_referral", config.XP_PER_REFERRAL)));
+  if (isNewUser) {
+    if (welcomeBonus > 0) {
+      addTransaction(userId, "welcome_bonus", welcomeBonus, "Bonus de bienvenue");
     }
+    if (referredBy) {
+      const referrer = getUser(referredBy);
+      if (referrer && !referrer.is_banned) {
+        const refBonus = parseFloat(getSetting("referral_bonus", config.REFERRAL_BONUS));
+        updateBalance(referredBy, refBonus, "referral_bonus", `Parrainage: ${firstName}`);
+        db.prepare("UPDATE users SET referral_count = referral_count + 1 WHERE user_id = ?").run(referredBy);
+        addXP(referredBy, parseInt(getSetting("xp_per_referral", config.XP_PER_REFERRAL)));
+      }
+    }
+    updateDailyStats("new_users", 1);
   }
 
-  updateDailyStats("new_users", 1);
   return getUser(userId);
 }
 
@@ -354,7 +357,7 @@ function updateBalance(userId, amount, type, description, referenceId = null) {
   const user = getUser(userId);
   if (!user) return false;
 
-  const newBalance = Math.round((user.balance + amount) * 100) / 100;
+  const newBalance = Math.round((user.balance + amount) * 10000) / 10000;
   if (newBalance < 0) return false;
 
   db.prepare("UPDATE users SET balance = ?, last_active = CURRENT_TIMESTAMP WHERE user_id = ?").run(newBalance, userId);
@@ -479,15 +482,16 @@ function getTask(taskId) {
   return db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId);
 }
 
-function getActiveTasks(type = null, userId = null) {
+function getActiveTasks(type = null, userId = null, userLevel = 1) {
   let query = `
-    SELECT * FROM tasks 
-    WHERE status = 'active' 
-    AND budget_remaining > 0 
+    SELECT * FROM tasks
+    WHERE status = 'active'
+    AND budget_remaining > 0
     AND current_completions < max_completions
     AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+    AND min_level <= ?
   `;
-  const params = [];
+  const params = [userLevel || 1];
 
   if (type) {
     query += " AND type = ?";
@@ -495,7 +499,14 @@ function getActiveTasks(type = null, userId = null) {
   }
 
   if (userId) {
-    query += ` AND creator_id != ? AND task_id NOT IN (SELECT task_id FROM task_completions WHERE user_id = ?)`;
+    // Exclure les tâches already permanently completed (allow_rerun=0 + verified)
+    // Les tâches allow_rerun=1 sont filtrées côté app avec vérification 24h
+    query += ` AND creator_id != ?`;
+    query += ` AND task_id NOT IN (
+      SELECT task_id FROM task_completions
+      WHERE user_id = ? AND status = 'verified'
+      AND task_id IN (SELECT task_id FROM tasks WHERE allow_rerun = 0)
+    )`;
     params.push(userId, userId);
   }
 
@@ -596,10 +607,11 @@ function verifyTaskCompletion(taskId, userId, forceApprove = false) {
   if (user && user.vip_level > 0) {
     const defaultBonus = (config.VIP_LEVELS[user.vip_level] || {}).bonus_percent || 0;
     const bonusPercent = parseFloat(getSetting(`vip_${user.vip_level}_task_bonus_pct`, defaultBonus));
-    reward = Math.round((reward * (1 + bonusPercent / 100)) * 100) / 100;
+    reward = Math.round((reward * (1 + bonusPercent / 100)) * 10000) / 10000;
   }
 
-  // Marquer comme vérifié
+  // Marquer comme vérifié — décrémenter le budget avec la récompense originale (pas VIP)
+  // Le bonus VIP est payé par la plateforme, pas par le créateur de la campagne
   db.prepare("UPDATE task_completions SET status = 'verified', verified_at = CURRENT_TIMESTAMP WHERE completion_id = ?").run(completion.completion_id);
   db.prepare("UPDATE tasks SET current_completions = current_completions + 1, budget_remaining = budget_remaining - ? WHERE task_id = ?").run(completion.reward + task.platform_fee, taskId);
   db.prepare("UPDATE users SET tasks_completed = tasks_completed + 1, daily_tasks_done = daily_tasks_done + 1 WHERE user_id = ?").run(userId);
@@ -612,7 +624,7 @@ function verifyTaskCompletion(taskId, userId, forceApprove = false) {
   // Commission parrainage
   if (user && user.referred_by) {
     const refPercent = parseFloat(getSetting("referral_percent", config.REFERRAL_PERCENT));
-    const refBonus = Math.round((completion.reward * refPercent / 100) * 100) / 100;
+    const refBonus = Math.round((completion.reward * refPercent / 100) * 10000) / 10000;
     if (refBonus > 0) {
       updateBalance(user.referred_by, refBonus, "referral_commission", `Commission: ${user.first_name}`);
       db.prepare("UPDATE users SET referral_earnings = referral_earnings + ? WHERE user_id = ?").run(refBonus, user.referred_by);

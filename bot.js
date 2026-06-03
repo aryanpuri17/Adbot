@@ -1050,7 +1050,7 @@ async function showTasksByType(cid, uid, type, user) {
     return bot.sendMessage(cid, `⏰ <b>Limite atteinte</b>\n\nTu as fait ${maxT}/${maxT} tâches aujourd'hui.\nReviens demain !`, { parse_mode: "HTML" });
   }
 
-  const tasks = db.getActiveTasks(type, uid);
+  const tasks = db.getActiveTasks(type, uid, user.level || 1);
   const typeNames = { channel: "📢 Canal", group: "👥 Groupe", bot: "🤖 Bot", miniapp: "🎮 Mini App" };
   const typeLabel = typeNames[type] || "📋";
 
@@ -1098,10 +1098,26 @@ async function handleStartTask(cid, uid, taskId, user) {
   const task = db.getTask(taskId);
   if (!task || task.status !== "active") return bot.sendMessage(cid, "❌ Tâche indisponible.");
 
-  // Vérif déjà fait
+  // Vérif déjà complété
   const existing = db.db.prepare("SELECT * FROM task_completions WHERE task_id=? AND user_id=?").get(taskId, uid);
   if (existing && existing.status === "verified") {
-    return bot.sendMessage(cid, "✅ Tu as déjà complété cette tâche.");
+    if (!task.allow_rerun) {
+      return bot.sendMessage(cid, "✅ Tu as déjà complété cette tâche.");
+    }
+    // allow_rerun : vérifier le cooldown 24h
+    const lastVerified = existing.verified_at ? new Date(existing.verified_at).getTime() : new Date(existing.completed_at).getTime();
+    const elapsed = Date.now() - lastVerified;
+    const cooldown = 24 * 3600 * 1000;
+    if (elapsed < cooldown) {
+      const remaining = Math.ceil((cooldown - elapsed) / 3600000);
+      return bot.sendMessage(cid,
+        `⏳ <b>Tâche répétable — patiente encore</b>\n\n` +
+        `⏰ Disponible dans <b>${remaining}h</b>`,
+        { parse_mode: "HTML" });
+    }
+    // Cooldown écoulé : remettre la complétion en pending pour pouvoir recommencer
+    db.db.prepare("UPDATE task_completions SET status='pending', completed_at=CURRENT_TIMESTAMP, verified_at=NULL WHERE task_id=? AND user_id=?")
+      .run(taskId, uid);
   }
 
   // ─── CANAL / GROUPE ───
@@ -2057,6 +2073,15 @@ bot.on("message", async (msg) => {
   // ─── Vérification de visite bot/miniapp (message transféré) ───
   if (st && st.state === "task_forward_proof") {
     const { taskId, targetUsername } = st.data;
+
+    // Vérifier que la tâche est toujours active avant de traiter
+    const fwdTask = db.getTask(taskId);
+    if (!fwdTask || fwdTask.status !== "active") {
+      clearState(uid);
+      return bot.sendMessage(cid,
+        `❌ <b>Tâche expirée ou indisponible.</b>\n\nChoisis une autre tâche.`,
+        { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    }
 
     if (!msg.forward_from && !msg.forward_from_chat) {
       return bot.sendMessage(cid,

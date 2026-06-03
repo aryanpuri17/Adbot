@@ -665,31 +665,38 @@ bot.on("callback_query", async (q) => {
     if (!st || st.state !== "ct_confirm") return;
     const d = st.data;
     const user2 = db.getUser(uid);
-    if (!debitSmart(uid, d.realBudget, "task_creation", `Campagne: ${d.title}`)) {
-      clearState(uid);
-      return bot.sendMessage(cid, "❌ Solde insuffisant.", { reply_markup: KB_MAIN(uid) });
-    }
     const descText = (d.type === "bot" || d.type === "miniapp")
       ? `Temps d'attente : ${d.durationSeconds}s`
       : `Reste abonné ${d.durationHours}h minimum`;
     let taskId;
+    let txError = null;
     try {
-      const ins = db.db.prepare(`
-        INSERT INTO tasks (creator_id, type, title, description, link, chat_id, proof_required, proof_instructions, reward, platform_fee, max_completions, budget, budget_remaining, countries, allow_vpn, allow_rerun, min_level, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
-      `).run(
-        uid, d.type, d.title, d.campaignDescription + "\n" + descText,
-        d.link, d.chatId || null,
-        d.reward, d.platformFee, d.maxC, d.realBudget, d.realBudget,
-        d.geoCountries || null, d.allowVpn ?? 1, d.allowRerun ?? 0,
-        d.expiresAt
-      );
-      taskId = ins.lastInsertRowid;
-      db.db.prepare("UPDATE users SET tasks_created = tasks_created + 1 WHERE user_id = ?").run(uid);
+      // Débit + INSERT atomiques — si l'INSERT échoue, le débit est annulé
+      taskId = db.db.transaction(() => {
+        if (!debitSmart(uid, d.realBudget, "task_creation", `Campagne: ${d.title}`)) return null;
+        const ins = db.db.prepare(`
+          INSERT INTO tasks (creator_id, type, title, description, link, chat_id, proof_required, proof_instructions, reward, platform_fee, max_completions, budget, budget_remaining, countries, allow_vpn, allow_rerun, min_level, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+        `).run(
+          uid, d.type, d.title, d.campaignDescription + "\n" + descText,
+          d.link, d.chatId || null,
+          d.reward, d.platformFee, d.maxC, d.realBudget, d.realBudget,
+          d.geoCountries || null, d.allowVpn ?? 1, d.allowRerun ?? 0,
+          d.expiresAt
+        );
+        db.db.prepare("UPDATE users SET tasks_created = tasks_created + 1 WHERE user_id = ?").run(uid);
+        return ins.lastInsertRowid;
+      })();
     } catch (e) {
       console.error("Task insert error:", e.message);
-      clearState(uid);
+      txError = e.message;
+    }
+    clearState(uid);
+    if (txError) {
       return bot.sendMessage(cid, "❌ Erreur lors de la création.", { reply_markup: KB_MAIN(uid) });
+    }
+    if (taskId === null) {
+      return bot.sendMessage(cid, "❌ Solde insuffisant.", { reply_markup: KB_MAIN(uid) });
     }
     clearState(uid);
     const durationTxt = d.type === "bot" || d.type === "miniapp"
@@ -889,7 +896,14 @@ bot.on("callback_query", async (q) => {
   }
   if (data.startsWith("rej_dep_")) {
     const depId = parseInt(data.replace("rej_dep_",""));
-    db.rejectDeposit(depId);
+    const dep = db.rejectDeposit(depId);
+    if (dep && dep.user_id) {
+      bot.sendMessage(dep.user_id,
+        `❌ <b>Dépôt non confirmé</b>\n\n` +
+        `Nous n'avons pas pu confirmer ton dépôt de <b>${fmt(dep.amount)}</b>.\n\n` +
+        `Si tu penses que c'est une erreur, contacte le support via 💬 Support.`,
+        { parse_mode: "HTML" }).catch(() => {});
+    }
     return bot.editMessageText((q.message.text || "") + "\n\n❌ REJETÉ", { chat_id: cid, message_id: mid });
   }
 
@@ -1812,6 +1826,12 @@ async function notifyUsersNewTask(task) {
     if (u.user_id === task.creator_id) continue;
     if (doneSet.has(u.user_id)) continue;
     if (maxNotify > 0 && sent >= maxNotify) break;
+
+    // Vérifier toutes les 200 notifications que la tâche est toujours active
+    if (sent > 0 && sent % 200 === 0) {
+      const freshTask = db.getTask(task.task_id);
+      if (!freshTask || freshTask.status !== "active") break;
+    }
 
     bot.sendMessage(u.user_id, notifMsg, {
       parse_mode: "HTML",

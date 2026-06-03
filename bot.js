@@ -590,26 +590,9 @@ bot.on("callback_query", async (q) => {
     const st = getState(uid);
     if (!st || st.state !== "ct_geo") return bot.answerCallbackQuery(q.id).catch(() => {});
     st.data.geoCountries = null;
-    setState(uid, "ct_vpn", st.data);
     const isChannelGroup = st.data.type === "channel" || st.data.type === "group";
-    const stepVpn = isChannelGroup ? 6 : 5;
-    return bot.sendMessage(cid,
-      `🔒 <b>Étape ${stepVpn} — Utilisateurs VPN</b>\n\n` +
-      `Veux-tu afficher ta campagne aux utilisateurs qui utilisent un VPN ?`,
-      { parse_mode: "HTML", reply_markup: KBI([
-        [{ text: "✅ Autoriser VPN", callback_data: "ct_vpn_allow" }],
-        [{ text: "🚫 Bloquer VPN",   callback_data: "ct_vpn_disallow" }],
-      ]) });
-  }
-
-  // VPN preference
-  if (data === "ct_vpn_allow" || data === "ct_vpn_disallow") {
-    const st = getState(uid);
-    if (!st || st.state !== "ct_vpn") return bot.answerCallbackQuery(q.id).catch(() => {});
-    st.data.allowVpn = data === "ct_vpn_allow" ? 1 : 0;
+    const stepRerun = isChannelGroup ? 6 : 5;
     setState(uid, "ct_rerun", st.data);
-    const isChannelGroup = st.data.type === "channel" || st.data.type === "group";
-    const stepRerun = isChannelGroup ? 7 : 6;
     return bot.sendMessage(cid,
       `🔄 <b>Étape ${stepRerun} — Répétition</b>\n\n` +
       `Veux-tu permettre aux mêmes utilisateurs de refaire cette tâche après 24h ?`,
@@ -626,7 +609,7 @@ bot.on("callback_query", async (q) => {
     st.data.allowRerun = data === "ct_rerun_yes" ? 1 : 0;
     const type = st.data.type;
     const isChannelGroup = type === "channel" || type === "group";
-    const stepReward = isChannelGroup ? 8 : 7;
+    const stepReward = isChannelGroup ? 7 : 6;
     if (type === "bot" || type === "miniapp") {
       const seconds = parseInt(db.getSetting("bot_wait_seconds", "30"));
       st.data.durationSeconds = seconds;
@@ -681,7 +664,7 @@ bot.on("callback_query", async (q) => {
           uid, d.type, d.title, d.campaignDescription + "\n" + descText,
           d.link, d.chatId || null,
           d.reward, d.platformFee, d.maxC, d.realBudget, d.realBudget,
-          d.geoCountries || null, d.allowVpn ?? 1, d.allowRerun ?? 0,
+          d.geoCountries || null, 1, d.allowRerun ?? 0,
           d.expiresAt
         );
         db.db.prepare("UPDATE users SET tasks_created = tasks_created + 1 WHERE user_id = ?").run(uid);
@@ -720,7 +703,7 @@ bot.on("callback_query", async (q) => {
         `📄 ${esc(d.campaignDescription || "")}\n` +
         `💰 ${fmt(d.reward)} × ${d.maxC} personnes\n` +
         `${durationTxt}\n` +
-        `🌍 ${d.geoCountries || "Monde entier"} · VPN: ${d.allowVpn ? "✅" : "🚫"} · Rerun: ${d.allowRerun ? "✅" : "🚫"}\n` +
+        `🌍 ${d.geoCountries || "Monde entier"} · Rerun: ${d.allowRerun ? "✅" : "🚫"}\n` +
         `🔗 ${esc(d.link)}`,
         { parse_mode: "HTML", reply_markup: KBI([[
           { text: "✅ Approuver", callback_data: `apr_task_${taskId}` },
@@ -2432,14 +2415,14 @@ bot.on("message", async (msg) => {
       return bot.sendMessage(cid, "❌ Codes invalides. Utilise le format : FR, BE, CH\nOu appuie sur ⏩ Skip.", { reply_markup: KBI([[{ text: "⏩ Skip — Monde entier", callback_data: "ct_geo_skip" }]]) });
     }
     const isChannelGroup = data.type === "channel" || data.type === "group";
-    const stepVpn = isChannelGroup ? 6 : 5;
-    setState(uid, "ct_vpn", { ...data, geoCountries: countries.join(",") });
+    const stepRerun = isChannelGroup ? 6 : 5;
+    setState(uid, "ct_rerun", { ...data, geoCountries: countries.join(",") });
     return bot.sendMessage(cid,
-      `🔒 <b>Étape ${stepVpn} — Utilisateurs VPN</b>\n\n` +
-      `Veux-tu afficher ta campagne aux utilisateurs qui utilisent un VPN ?`,
+      `🔄 <b>Étape ${stepRerun} — Répétition</b>\n\n` +
+      `Veux-tu permettre aux mêmes utilisateurs de refaire cette tâche après 24h ?`,
       { parse_mode: "HTML", reply_markup: KBI([
-        [{ text: "✅ Autoriser VPN",  callback_data: "ct_vpn_allow" }],
-        [{ text: "🚫 Bloquer VPN",    callback_data: "ct_vpn_disallow" }],
+        [{ text: "✅ Oui — autoriser après 24h", callback_data: "ct_rerun_yes" }],
+        [{ text: "🚫 Non — une seule fois",       callback_data: "ct_rerun_no"  }],
       ]) });
   }
 
@@ -2453,7 +2436,7 @@ bot.on("message", async (msg) => {
       return bot.sendMessage(cid, `❌ Minimum : ${realMin.toFixed(4)}$ par utilisateur.`);
     }
     const isChannelGroup = type === "channel" || type === "group";
-    const stepBudget = isChannelGroup ? 9 : 8;
+    const stepBudget = isChannelGroup ? 8 : 7;
     setState(uid, "ct_budget", { ...data, reward });
     user = db.getUser(uid);
     const avail = (user.balance || 0) + (user.deposit_balance || 0);
@@ -2498,7 +2481,6 @@ bot.on("message", async (msg) => {
       `📄 <b>Description :</b>\n${esc(data.campaignDescription || "")}\n\n` +
       `🔗 <b>Lien :</b> ${esc(data.link)}\n\n` +
       `🌍 <b>Ciblage :</b> ${geoTxt}\n` +
-      `🔒 <b>VPN :</b> ${(data.allowVpn ?? 1) ? "✅ Autorisé" : "🚫 Bloqué"}\n` +
       `🔄 <b>Répétition :</b> ${data.allowRerun ? "✅ Après 24h" : "🚫 Une seule fois"}\n` +
       `${durationTxt}\n\n` +
       `━━━━━━━━━━━━━━━━━━━━━━\n` +

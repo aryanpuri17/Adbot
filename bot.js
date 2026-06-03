@@ -207,7 +207,7 @@ const KB_GAMES    = KB([["🎡 Roue Fortune"], ["🎲 Dés", "🪙 Pile/Face"], 
 const KB_PARRAIN  = KB([["🔗 Mon Lien"],["🏠 Accueil"]]);
 const KB_ADMIN    = KB([
   ["📊 Stats","⚙️ Config Bot"],
-  ["🎮 Config Jeux"],
+  ["🎮 Config Jeux","💎 VIP & Niveaux"],
   ["📋 Tâches Admin","📸 Preuves"],
   ["🏧 Retraits","💳 Dépôts"],
   ["👥 Users","🎫 Tickets"],
@@ -469,6 +469,58 @@ bot.on("callback_query", async (q) => {
     return bot.sendMessage(cid, `❌ ${reasonMap[r?.reason] || "Impossible"}.`);
   }
 
+  // ─── VIP Purchase ───
+  if (data.startsWith("buy_vip_")) {
+    const vipLvl = parseInt(data.replace("buy_vip_",""));
+    if (vipLvl < 1 || vipLvl > 4) return;
+    const vipNames2 = { 1: "🥉 Bronze", 2: "🥈 Silver", 3: "🥇 Gold", 4: "💎 Diamond" };
+    const defConf2  = config.VIP_LEVELS[vipLvl] || {};
+    const price2    = parseFloat(db.getSetting(`vip_${vipLvl}_price`, defConf2.price || 0));
+    if (user.vip_level >= vipLvl) {
+      return bot.answerCallbackQuery(q.id, { text: "✅ Tu as déjà ce niveau VIP ou supérieur." });
+    }
+    setState(uid, "vip_confirm", { level: vipLvl, price: price2 });
+    return bot.sendMessage(cid,
+      `💎 <b>Acheter VIP ${vipNames2[vipLvl]}</b>\n\n` +
+      `💰 Prix : <b>${fmt(price2)}</b>\n` +
+      `💳 Sera débité de ton solde (dépôt puis gains).\n\n` +
+      `Confirmes-tu l'achat ?`,
+      { parse_mode: "HTML", reply_markup: KBI([
+        [{ text: "✅ Confirmer", callback_data: `vip_buy_confirm_${vipLvl}` },
+         { text: "❌ Annuler",   callback_data: "vip_buy_cancel" }]
+      ]) });
+  }
+  if (data.startsWith("vip_buy_confirm_")) {
+    const vipLvl2 = parseInt(data.replace("vip_buy_confirm_",""));
+    const st3 = getState(uid);
+    if (!st3 || st3.state !== "vip_confirm" || st3.data.level !== vipLvl2) return;
+    clearState(uid);
+    const vipNames3 = { 1: "🥉 Bronze", 2: "🥈 Silver", 3: "🥇 Gold", 4: "💎 Diamond" };
+    const defConf3  = config.VIP_LEVELS[vipLvl2] || {};
+    const price3    = parseFloat(db.getSetting(`vip_${vipLvl2}_price`, defConf3.price || 0));
+    const ok = db.debitSmart(uid, price3, "vip_purchase", `Achat VIP ${vipNames3[vipLvl2]}`);
+    if (!ok) {
+      return bot.sendMessage(cid,
+        `❌ Solde insuffisant.\n\n💰 Requis : <b>${fmt(price3)}</b>\n\nDépose des fonds pour acheter le VIP.`,
+        { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    }
+    db.db.prepare("UPDATE users SET vip_level = ? WHERE user_id = ?").run(vipLvl2, uid);
+    return bot.sendMessage(cid,
+      `🎉 <b>Félicitations !</b>\n\nTu es maintenant <b>${vipNames3[vipLvl2]}</b> !\n\n` +
+      `✅ Avantages activés immédiatement.`,
+      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+  }
+  if (data === "vip_buy_cancel") {
+    clearState(uid);
+    return bot.editMessageText("❌ Achat VIP annulé.", { chat_id: cid, message_id: mid }).catch(() =>
+      bot.sendMessage(cid, "❌ Achat VIP annulé.", { reply_markup: KB_MAIN(uid) }));
+  }
+  if (data === "go_home") {
+    clearState(uid);
+    user = db.getUser(uid);
+    return sendHome(cid, user);
+  }
+
   // ─── Dépôts ───
   if (data.startsWith("dep_")) {
     const method = data.replace("dep_","");
@@ -511,18 +563,47 @@ bot.on("callback_query", async (q) => {
     return bot.editMessageText("❌ Retrait annulé.", { chat_id: cid, message_id: mid }).catch(() =>
       bot.sendMessage(cid, "❌ Retrait annulé.", { reply_markup: KB_MAIN(uid) }));
   }
-  if (data.startsWith("wd_")) {
+  if (data.startsWith("wd_preset_")) {
+    const parts = data.replace("wd_preset_","").split("_");
+    const presetAmt = parseFloat(parts[0]);
+    // Treat like user typed the amount while in wd_amount state
+    const stNow = getState(uid);
+    if (!stNow || stNow.state !== "wd_amount") return;
+    const method = stNow.data.method;
+    const minW2  = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
+    const maxW2  = parseFloat(db.getSetting("max_withdrawal", config.MAX_WITHDRAWAL));
+    const u2     = db.getUser(uid);
+    if (isNaN(presetAmt) || presetAmt < minW2 || presetAmt > maxW2 || presetAmt > u2.balance) {
+      return bot.answerCallbackQuery(q.id, { text: `❌ Montant invalide ou solde insuffisant.` });
+    }
+    const feeP3 = parseFloat(db.getSetting("withdrawal_fee_percent", config.WITHDRAWAL_FEE_PERCENT));
+    const fee3  = Math.round(presetAmt * (feeP3 / 100) * 100) / 100;
+    const net3  = Math.round((presetAmt - fee3) * 100) / 100;
+    setState(uid, "wd_wallet", { method, amount: presetAmt, fee: fee3, netAmount: net3 });
+    return bot.sendMessage(cid,
+      `👛 Envoie maintenant ton adresse wallet <b>${config.WITHDRAWAL_METHODS[method]?.name}</b> :`,
+      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+  }
+  if (data.startsWith("wd_") && !data.startsWith("wd_confirm") && !data.startsWith("wd_cancel") && !data.startsWith("wd_wallet") && !data.startsWith("wd_pending")) {
     const method = data.replace("wd_","");
     if (!config.WITHDRAWAL_METHODS[method]) return;
     const minW = parseFloat(db.getSetting("min_withdrawal", config.MIN_WITHDRAWAL));
     const maxW = parseFloat(db.getSetting("max_withdrawal", config.MAX_WITHDRAWAL));
     setState(uid, "wd_amount", { method });
+    const presets = [5, 10, 25, 50].filter(p => p >= minW && p <= maxW && p <= user.balance);
+    const presetRows = presets.length
+      ? [presets.map(p => ({ text: `${p}$`, callback_data: `wd_preset_${p}_${method}` }))]
+      : [];
+    const allPresetRows = [
+      ...presetRows,
+      [{ text: "❌ Annuler", callback_data: "wd_cancel" }]
+    ];
     return bot.sendMessage(cid,
       `🏧 <b>RETRAIT ${config.WITHDRAWAL_METHODS[method]?.name}</b>\n\n` +
       `💰 Solde retirable : <b>${fmt(user.balance)}</b>\n` +
       `📌 Min : <b>${fmt(minW)}</b> · Max : <b>${fmt(maxW)}</b>\n\n` +
-      `Combien veux-tu retirer ?`,
-      { parse_mode: "HTML", reply_markup: KB_CANCEL });
+      `Choisis un montant ou tape le montant souhaité :`,
+      { parse_mode: "HTML", reply_markup: KBI(allPresetRows) });
   }
 
   // ─── Créer Campagne ───
@@ -985,11 +1066,24 @@ async function handleVerifyTask(cid, uid, taskId, user) {
   const r = db.verifyTaskCompletion(taskId, uid, true);
   if (r.success) {
     const nuAfter = db.getUser(uid);
-    return bot.sendMessage(cid,
-      `✅ <b>Tâche validée !</b>\n\n` +
-      `💰 +<b>${fmt(r.reward)}</b> crédité !\n` +
-      `💵 Gains : <b>${fmt(nuAfter.balance)}</b>`,
-      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    let msg = `✅ <b>Tâche validée !</b>\n\n💰 +<b>${fmt(r.reward)}</b> crédité !\n💵 Gains : <b>${fmt(nuAfter.balance)}</b>`;
+    if (r.levelUp && r.levelUp.leveledUp) {
+      msg += `\n\n🎉 <b>NIVEAU ${r.levelUp.newLevel} ATTEINT !</b>`;
+      if (r.levelUp.reward > 0) msg += `\n🎁 Bonus : +<b>${fmt(r.levelUp.reward)}</b>`;
+    }
+    // Notifier le créateur si la campagne vient de se terminer
+    if (r.taskCompleted && r.task) {
+      const creator = db.getUser(r.task.created_by);
+      if (creator) {
+        bot.sendMessage(r.task.created_by,
+          `📢 <b>Campagne terminée !</b>\n\n` +
+          `📋 <b>${esc(r.task.title)}</b>\n` +
+          `✅ Toutes les places ont été complétées.\n` +
+          `💰 Budget utilisé : <b>${fmt(r.task.budget - (r.task.budget_remaining || 0))}</b>`,
+          { parse_mode: "HTML" }).catch(() => {});
+      }
+    }
+    return bot.sendMessage(cid, msg, { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
   }
   return bot.sendMessage(cid, "❌ Validation impossible.");
 }
@@ -1504,6 +1598,37 @@ function showDailyBonus(cid, uid, user) {
         : KBI([[{ text: "🎁 Réclamer mon bonus !", callback_data: "claim_daily_bonus" }]]) });
 }
 
+function showVipShop(cid, uid) {
+  const user = db.getUser(uid);
+  if (!user) return;
+  const vipNames = { 1: "🥉 Bronze", 2: "🥈 Silver", 3: "🥇 Gold", 4: "💎 Diamond" };
+  const currentVip = user.vip_level || 0;
+  const total = (user.balance || 0) + (user.deposit_balance || 0);
+
+  let txt = `💎 <b>BOUTIQUE VIP</b>\n\n💰 Ton solde : <b>${fmt(total)}</b>\n\n`;
+  const rows = [];
+
+  for (let lvl = 1; lvl <= 4; lvl++) {
+    const defConf = config.VIP_LEVELS[lvl] || {};
+    const price       = parseFloat(db.getSetting(`vip_${lvl}_price`,       defConf.price        || 0));
+    const taskBonus   = parseFloat(db.getSetting(`vip_${lvl}_task_bonus_pct`, defConf.bonus_percent || 0));
+    const maxTasks    = parseInt  (db.getSetting(`vip_${lvl}_max_tasks`,    defConf.max_tasks_day || 50));
+    const feeDiscount = parseFloat(db.getSetting(`vip_${lvl}_fee_discount`, defConf.withdrawal_fee_discount || 0));
+
+    const isCurrent = currentVip === lvl;
+    const isOwned   = currentVip > lvl;
+    txt += `${vipNames[lvl]}${isCurrent ? " ✅ ACTIF" : isOwned ? " ✓ Déjà dépassé" : ""}\n`;
+    txt += `  💰 ${fmt(price)} | +${taskBonus}% tâches | ${maxTasks} tâches/j | -${feeDiscount}% frais\n\n`;
+
+    if (!isCurrent && !isOwned) {
+      rows.push([{ text: `Acheter ${vipNames[lvl]} — ${fmt(price)}`, callback_data: `buy_vip_${lvl}` }]);
+    }
+  }
+
+  rows.push([{ text: "🏠 Accueil", callback_data: "go_home" }]);
+  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KBI(rows) });
+}
+
 function showProfile(cid, uid) {
   const user = db.getUser(uid);
   if (!user) return;
@@ -1539,7 +1664,7 @@ function showProfile(cid, uid) {
     `🏅 Classement : <b>#${rank}</b>\n` +
     `📅 Inscrit : <b>${fmtDate(user.created_at)}</b>`,
     { parse_mode: "HTML",
-      reply_markup: KB([["🏅 Classement", "📜 Transactions"], ["⚙️ Paramètres"], ["🏠 Accueil"]]) });
+      reply_markup: KB([["🏅 Classement", "📜 Transactions"], ["💎 Acheter VIP", "⚙️ Paramètres"], ["🏠 Accueil"]]) });
 }
 
 function showLeaderboard(cid, uid) {
@@ -1766,12 +1891,55 @@ function botSettings() {
 function gameSettings() {
   return [
     { key: "spin_cost",          label: "🎡 Coût spin" },
+    { key: "daily_free_spins",   label: "🎟️ Spins gratuits/jour" },
     { key: "dice_multiplier",    label: "🎲 Dés multiplicateur" },
     { key: "coinflip_multiplier",label: "🪙 Pile/Face multiplicateur" },
     { key: "jackpot_cost",        label: "🏆 Jackpot ticket" },
     { key: "jackpot_chance",      label: "🏆 Jackpot chance %" },
     { key: "jackpot_pool",        label: "🏆 Jackpot pool" },
   ];
+}
+
+function vipSettings() {
+  const defs = config.VIP_LEVELS;
+  const result = [];
+  for (let lvl = 1; lvl <= 4; lvl++) {
+    const d = defs[lvl] || {};
+    result.push({ key: `vip_${lvl}_price`,         label: `💎 Prix VIP ${lvl}` });
+    result.push({ key: `vip_${lvl}_task_bonus_pct`, label: `📈 Bonus tâches VIP ${lvl} (%)` });
+    result.push({ key: `vip_${lvl}_max_tasks`,      label: `📋 Max tâches/j VIP ${lvl}` });
+    result.push({ key: `vip_${lvl}_fee_discount`,   label: `💸 Réduction frais VIP ${lvl} (%)` });
+  }
+  return result;
+}
+
+function levelSettings() {
+  return [
+    { key: "xp_per_task",     label: "⚡ XP par tâche" },
+    { key: "xp_per_referral", label: "⚡ XP par parrainage" },
+    ...Array.from({ length: 9 }, (_, i) => ({
+      key:   `level_reward_${i + 2}`,
+      label: `🎁 Récompense niveau ${i + 2}`,
+    })),
+  ];
+}
+
+function showConfigVipLevels(cid) {
+  const vS = vipSettings();
+  const lS = levelSettings();
+  let txt = `💎 <b>CONFIG VIP & NIVEAUX</b>\n\n<b>VIP :</b>\n`;
+  const vipNames4 = { 1: "Bronze", 2: "Silver", 3: "Gold", 4: "Diamond" };
+  for (let lvl = 1; lvl <= 4; lvl++) {
+    const price   = db.getSetting(`vip_${lvl}_price`,         config.VIP_LEVELS[lvl]?.price         || "—");
+    const bonus   = db.getSetting(`vip_${lvl}_task_bonus_pct`,config.VIP_LEVELS[lvl]?.bonus_percent  || "—");
+    const maxT    = db.getSetting(`vip_${lvl}_max_tasks`,      config.VIP_LEVELS[lvl]?.max_tasks_day || "—");
+    const feeD    = db.getSetting(`vip_${lvl}_fee_discount`,   config.VIP_LEVELS[lvl]?.withdrawal_fee_discount || "—");
+    txt += `${vipNames4[lvl]}: ${price}$ | +${bonus}% | ${maxT}t/j | -${feeD}%\n`;
+  }
+  txt += `\n<b>XP & Niveaux :</b>\n`;
+  lS.forEach(s => { txt += `${s.label}: <b>${esc(String(db.getSetting(s.key, "—")))}</b>\n`; });
+  const rows = [...vS, ...lS].map(s => [{ text: `✏️ ${s.label}`, callback_data: `set_${s.key}` }]);
+  bot.sendMessage(cid, txt, { parse_mode: "HTML", reply_markup: KBI(rows) });
 }
 
 function showConfigBot(cid) {
@@ -1993,6 +2161,7 @@ bot.on("message", async (msg) => {
   if (text === "💬 Support")     { clearState(uid); return showSupport(cid, uid); }
   if (text === "🎫 Support")     { clearState(uid); return showSupport(cid, uid); }
   if (text === "⚙️ Paramètres") { clearState(uid); return showSettings(cid, user); }
+  if (text === "💎 Acheter VIP") { clearState(uid); return showVipShop(cid, uid); }
   if (text === "👑 Admin" && isAdmin(uid)) { clearState(uid); return showAdmin(cid); }
 
   // ─── Balance ───
@@ -2096,6 +2265,7 @@ bot.on("message", async (msg) => {
     if (text === "📊 Stats")          return showAdminStats(cid);
     if (text === "⚙️ Config Bot")     return showConfigBot(cid);
     if (text === "🎮 Config Jeux")    return showConfigGames(cid);
+    if (text === "💎 VIP & Niveaux")  return showConfigVipLevels(cid);
     if (text === "📋 Tâches Admin")   return showAdminTasks(cid);
     if (text === "📸 Preuves")        return showAdminProofs(cid);
     if (text === "🏧 Retraits")       return showAdminWithdrawals(cid);
@@ -2576,6 +2746,30 @@ const defaults = {
   "jackpot_cost":        "0.10",
   "guess_cost":          "0.05",
   "guess_prize":         "0.20",
+  "daily_free_spins":    String(config.SPIN_WHEEL.daily_free_spins || 1),
+  "xp_per_task":         String(config.XP_PER_TASK),
+  "xp_per_referral":     String(config.XP_PER_REFERRAL),
+  // VIP prices and perks
+  "vip_1_price":          String(config.VIP_LEVELS[1]?.price || 5),
+  "vip_1_task_bonus_pct": String(config.VIP_LEVELS[1]?.bonus_percent || 5),
+  "vip_1_max_tasks":      String(config.VIP_LEVELS[1]?.max_tasks_day || 100),
+  "vip_1_fee_discount":   String(config.VIP_LEVELS[1]?.withdrawal_fee_discount || 10),
+  "vip_2_price":          String(config.VIP_LEVELS[2]?.price || 15),
+  "vip_2_task_bonus_pct": String(config.VIP_LEVELS[2]?.bonus_percent || 10),
+  "vip_2_max_tasks":      String(config.VIP_LEVELS[2]?.max_tasks_day || 200),
+  "vip_2_fee_discount":   String(config.VIP_LEVELS[2]?.withdrawal_fee_discount || 25),
+  "vip_3_price":          String(config.VIP_LEVELS[3]?.price || 50),
+  "vip_3_task_bonus_pct": String(config.VIP_LEVELS[3]?.bonus_percent || 20),
+  "vip_3_max_tasks":      String(config.VIP_LEVELS[3]?.max_tasks_day || 500),
+  "vip_3_fee_discount":   String(config.VIP_LEVELS[3]?.withdrawal_fee_discount || 50),
+  "vip_4_price":          String(config.VIP_LEVELS[4]?.price || 150),
+  "vip_4_task_bonus_pct": String(config.VIP_LEVELS[4]?.bonus_percent || 30),
+  "vip_4_max_tasks":      String(config.VIP_LEVELS[4]?.max_tasks_day || 999),
+  "vip_4_fee_discount":   String(config.VIP_LEVELS[4]?.withdrawal_fee_discount || 75),
+  // Level rewards (level 2–10)
+  ...Object.fromEntries(
+    config.LEVEL_REWARDS.slice(1).map((r, i) => [`level_reward_${i + 2}`, String(r)])
+  ),
 };
 for (const [k, v] of Object.entries(defaults)) {
   if (db.getSetting(k, null) === null || db.getSetting(k, "") === "") {

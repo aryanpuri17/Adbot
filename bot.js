@@ -333,8 +333,9 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
 
   // Canaux obligatoires
   if (!await checkRequiredChannels(uid)) {
+    const botNameJoin = db.getSetting("bot_name","ADCRYPTON");
     return bot.sendMessage(cid,
-      `👋 <b>${db.getSetting("bot_name","ADCRYPTON")}</b>\n\n📢 Rejoins nos canaux pour continuer :`,
+      `📢 <b>Dernière étape !</b>\n\nPour accéder à <b>${esc(botNameJoin)}</b>, rejoins nos canaux officiels :`,
       { parse_mode: "HTML", reply_markup: channelJoinButtons() });
   }
 
@@ -365,10 +366,11 @@ bot.on("callback_query", async (q) => {
     if (answer === st.data.answer) {
       db.updateUser(uid, { is_verified: 1 });
       clearState(uid);
-      await bot.editMessageText("✅ <b>Vérifié !</b>", { chat_id: cid, message_id: mid, parse_mode: "HTML" });
+      await bot.editMessageText("✅ <b>Identité confirmée !</b>\n\nBienvenue 🎉", { chat_id: cid, message_id: mid, parse_mode: "HTML" });
       if (!await checkRequiredChannels(uid)) {
+        const botName2 = db.getSetting("bot_name","ADCRYPTON");
         return bot.sendMessage(cid,
-          `📢 Rejoins nos canaux pour continuer :`,
+          `📢 <b>Dernière étape !</b>\n\nRejoins nos canaux officiels pour accéder à <b>${esc(botName2)}</b> :`,
           { parse_mode: "HTML", reply_markup: channelJoinButtons() });
       }
       return sendHome(cid, db.getUser(uid));
@@ -493,15 +495,7 @@ bot.on("callback_query", async (q) => {
       `👛 Vers : <code>${wallet}</code>\n\n` +
       `⏳ Traitement sous 24h.`,
       { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
-    // Notif canal paiements — retrait en attente
-    const payChWd = db.getSetting("payment_channel", "");
-    if (payChWd) {
-      bot.sendMessage(payChWd,
-        `⏳ <b>Retrait en cours de traitement</b>\n\n` +
-        `💵 ${fmt(wd.net_amount)}\n` +
-        `📲 Paiement sous 24h — rejoins et gagne toi aussi !`,
-        { parse_mode: "HTML" }).catch(() => {});
-    }
+    // Notif canal paiements — retraits en attente supprimés (on poste seulement les confirmés)
     for (const aid of config.ADMIN_IDS) {
       bot.sendMessage(aid,
         `🏧 <b>Retrait #${wdId}</b>\n👤 ${esc(user.first_name)} (${uid})\n💵 ${fmt(wd.net_amount)} (frais: ${fmt(wd.fee)})\n👛 <code>${wallet}</code>\n📌 ${method}`,
@@ -570,14 +564,24 @@ bot.on("callback_query", async (q) => {
     const tid = parseInt(data.replace("apr_task_",""));
     db.approveTask(tid, "OK");
     const t = db.getTask(tid);
-    if (t) bot.sendMessage(t.creator_id, `✅ Ta campagne <b>${esc(t.title)}</b> est approuvée !`, { parse_mode: "HTML" }).catch(() => {});
+    if (t) bot.sendMessage(t.creator_id,
+      `✅ <b>Campagne approuvée !</b>\n\n` +
+      `📌 <b>${esc(t.title)}</b>\n` +
+      `💰 ${fmt(t.reward)} par personne · ${t.max_completions} participants max\n\n` +
+      `Ta campagne est maintenant visible par tous les utilisateurs.`,
+      { parse_mode: "HTML" }).catch(() => {});
     return bot.editMessageText((q.message.text || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid });
   }
   if (data.startsWith("rej_task_")) {
     const tid = parseInt(data.replace("rej_task_",""));
     db.rejectTask(tid, "Rejeté");
     const t = db.getTask(tid);
-    if (t) bot.sendMessage(t.creator_id, `❌ Ta campagne a été rejetée. Budget remboursé.`).catch(() => {});
+    if (t) bot.sendMessage(t.creator_id,
+      `❌ <b>Campagne rejetée</b>\n\n` +
+      `📌 ${esc(t.title)}\n\n` +
+      `Ton budget a été remboursé intégralement.\n` +
+      `Contacte le support si tu as des questions.`,
+      { parse_mode: "HTML" }).catch(() => {});
     return bot.editMessageText((q.message.text || "") + "\n\n❌ REJETÉ", { chat_id: cid, message_id: mid });
   }
 
@@ -587,7 +591,9 @@ bot.on("callback_query", async (q) => {
     const comp = db.db.prepare("SELECT * FROM task_completions WHERE completion_id=?").get(cmpId);
     if (comp) {
       const r = db.verifyTaskCompletion(comp.task_id, comp.user_id, true);
-      if (r.success) bot.sendMessage(comp.user_id, `✅ Preuve validée ! +${fmt(r.reward)} crédité.`).catch(() => {});
+      if (r.success) bot.sendMessage(comp.user_id,
+        `✅ <b>Preuve validée !</b>\n\n💰 +<b>${fmt(r.reward)}</b> crédité dans tes gains.\n\nMerci pour ta participation !`,
+        { parse_mode: "HTML" }).catch(() => {});
     }
     return bot.editMessageCaption((q.message.caption || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid }).catch(() => {
       bot.editMessageText((q.message.text || "") + "\n\n✅ APPROUVÉ", { chat_id: cid, message_id: mid }).catch(() => {});
@@ -597,7 +603,9 @@ bot.on("callback_query", async (q) => {
     const cmpId = parseInt(data.replace("rej_proof_",""));
     const comp = db.db.prepare("SELECT * FROM task_completions WHERE completion_id=?").get(cmpId);
     db.db.prepare("UPDATE task_completions SET status='rejected' WHERE completion_id=?").run(cmpId);
-    if (comp) bot.sendMessage(comp.user_id, `❌ Preuve rejetée.`).catch(() => {});
+    if (comp) bot.sendMessage(comp.user_id,
+      `❌ <b>Preuve refusée</b>\n\nTa preuve n'a pas été acceptée.\nTu peux retenter ou contacter le support via 💬 Support.`,
+      { parse_mode: "HTML" }).catch(() => {});
     return bot.editMessageCaption((q.message.caption || "") + "\n\n❌ REJETÉ", { chat_id: cid, message_id: mid }).catch(() => {
       bot.editMessageText((q.message.text || "") + "\n\n❌ REJETÉ", { chat_id: cid, message_id: mid }).catch(() => {});
     });
@@ -621,8 +629,10 @@ bot.on("callback_query", async (q) => {
 
     bot.sendMessage(dep.user_id,
       `✅ <b>Dépôt confirmé !</b>\n\n` +
-      `💰 ${dep.amount} ${symbol} → <b>+${fmt(usdAmount)}</b>\n\n` +
-      `💳 Ajouté à ta balance dépôt.\nℹ️ Utilisable pour jeux et campagnes (non retirable).`,
+      `💎 ${dep.amount} ${symbol} → <b>+${fmt(usdAmount)}</b>\n\n` +
+      `💳 Ajouté à ta balance dépôt.\n` +
+      `📌 Utilisable pour créer des campagnes et jouer aux mini-jeux.\n\n` +
+      `Ton nouveau solde dépôt : <b>${fmt((db.getUser(dep.user_id) || {}).deposit_balance || 0)}</b>`,
       { parse_mode: "HTML" }).catch(() => {});
     return bot.editMessageText((q.message.text || "") + "\n\n✅ CONFIRMÉ", { chat_id: cid, message_id: mid });
   }
@@ -649,16 +659,30 @@ bot.on("callback_query", async (q) => {
         else cryptoTxt = ` (≈ ${wd.net_amount.toFixed(2)} USDT)`;
       } catch {}
 
+      const wdUser = db.getUser(wd.user_id);
+      // Notification à l'utilisateur
       bot.sendMessage(wd.user_id,
-        `✅ <b>Retrait envoyé !</b>\n💵 ${fmt(wd.net_amount)}${cryptoTxt}\n👛 <code>${wd.wallet_address}</code>`,
+        `✅ <b>Ton retrait a été envoyé !</b>\n\n` +
+        `💵 Montant : <b>${fmt(wd.net_amount)}</b>${cryptoTxt}\n` +
+        `👛 Adresse : <code>${wd.wallet_address}</code>\n\n` +
+        `Merci pour ta confiance 🙏`,
         { parse_mode: "HTML" }).catch(() => {});
+      // Notification canal paiements — seulement les retraits confirmés
       const payChannel = db.getSetting("payment_channel","");
       if (payChannel) {
+        const wdDate = new Date().toLocaleString("fr-FR", { day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit" });
+        const walletShort = wd.wallet_address.length > 12
+          ? wd.wallet_address.slice(0,6) + "..." + wd.wallet_address.slice(-4)
+          : wd.wallet_address;
+        const botName = db.getSetting("bot_name", "ADCRYPTON");
         bot.sendMessage(payChannel,
-          `💸 <b>Paiement envoyé !</b>\n\n` +
-          `💵 ${fmt(wd.net_amount)}${cryptoTxt}\n` +
-          `✅ Traitement réussi\n\n` +
-          `📲 Toi aussi, commence à gagner dès maintenant !`,
+          `✅ <b>Retrait confirmé</b>\n\n` +
+          `👤 ID : <code>${wd.user_id}</code>\n` +
+          `💵 Montant : <b>${fmt(wd.net_amount)}</b>${cryptoTxt}\n` +
+          `💎 Méthode : <b>${wdSym}</b>\n` +
+          `👛 Adresse : <code>${walletShort}</code>\n` +
+          `🕐 ${wdDate}\n\n` +
+          `💸 Rejoins <b>${esc(botName)}</b> et gagne toi aussi !`,
           { parse_mode: "HTML" }).catch(() => {});
       }
     }
@@ -667,7 +691,11 @@ bot.on("callback_query", async (q) => {
   if (data.startsWith("rej_wd_")) {
     const wdId = parseInt(data.replace("rej_wd_",""));
     const wd   = db.rejectWithdrawal(wdId);
-    if (wd) bot.sendMessage(wd.user_id, `❌ Retrait rejeté.\n💰 ${fmt(wd.amount)} remboursé.`).catch(() => {});
+    if (wd) bot.sendMessage(wd.user_id,
+      `❌ <b>Retrait annulé</b>\n\n` +
+      `💵 ${fmt(wd.amount)} a été remboursé dans ton solde.\n\n` +
+      `Si tu as des questions, contacte le support via 💬 Support.`,
+      { parse_mode: "HTML" }).catch(() => {});
     return bot.editMessageText((q.message.text || "") + "\n\n❌ REJETÉ", { chat_id: cid, message_id: mid });
   }
 
@@ -1345,7 +1373,12 @@ async function drawGiveawayManually(cid, gaId) {
     db.db.prepare("UPDATE giveaway_entries SET is_winner=1, prize_amount=? WHERE giveaway_id=? AND user_id=?").run(prize, gaId, winnerId);
     const w = db.getUser(winnerId);
     report += `${i+1}er : <b>${esc(w?.first_name || "?")}</b> — ${fmt(prize)}\n`;
-    bot.sendMessage(winnerId, `🎉 <b>Tu as gagné le concours !</b>\nPosition : ${i+1}er\n💰 +${fmt(prize)} crédité !`, { parse_mode: "HTML" }).catch(() => {});
+    bot.sendMessage(winnerId,
+      `🎉 <b>Félicitations — Tu as gagné !</b>\n\n` +
+      `🏆 Concours : <b>${esc(ga.title)}</b>\n` +
+      `🥇 Position : <b>${i+1}${i === 0 ? "er" : "ème"}</b>\n` +
+      `💰 +<b>${fmt(prize)}</b> crédité dans tes gains !`,
+      { parse_mode: "HTML" }).catch(() => {});
   }
 
   db.db.prepare("UPDATE giveaways SET status='ended', drawn_at=CURRENT_TIMESTAMP WHERE giveaway_id=?").run(gaId);
@@ -2346,7 +2379,9 @@ bot.on("message", async (msg) => {
     const amount = parseFloat(text);
     if (isNaN(amount)) return bot.sendMessage(cid, "❌ Invalide.");
     db.updateBalance(data.uid, amount, "admin_edit", `Admin: ${fmtUSD(amount)}`);
-    bot.sendMessage(data.uid, `💰 Solde modifié par admin : <b>${amount>0?"+":""}${fmt(amount)}</b>`, { parse_mode: "HTML" }).catch(() => {});
+    bot.sendMessage(data.uid,
+      `💰 <b>Solde ajusté</b>\n\n${amount > 0 ? `+${fmt(amount)} ajouté` : `${fmt(amount)} retiré`} par l'administration.`,
+      { parse_mode: "HTML" }).catch(() => {});
     clearState(uid);
     return bot.sendMessage(cid, `✅ Modifié.`, { reply_markup: KB_ADMIN });
   }
@@ -2357,13 +2392,13 @@ bot.on("message", async (msg) => {
     if (text.startsWith("unban:")) {
       const tid = parseInt(text.replace("unban:",""));
       db.banUser(tid, false, "");
-      bot.sendMessage(tid, "✅ Débanni !").catch(() => {});
+      bot.sendMessage(tid, "✅ <b>Ton compte a été réactivé.</b>\nTu peux maintenant utiliser le bot normalement.", { parse_mode: "HTML" }).catch(() => {});
       return bot.sendMessage(cid, `✅ ${tid} débanni.`, { reply_markup: KB_ADMIN });
     }
     const tid = parseInt(text);
     if (isNaN(tid)) return bot.sendMessage(cid, "❌ Invalide.");
     db.banUser(tid, true, "Admin");
-    bot.sendMessage(tid, "⛔ Compte banni.").catch(() => {});
+    bot.sendMessage(tid, "⛔ <b>Compte suspendu.</b>\nContacte le support si tu penses que c'est une erreur.", { parse_mode: "HTML" }).catch(() => {});
     return bot.sendMessage(cid, `✅ ${tid} banni.`, { reply_markup: KB_ADMIN });
   }
 
@@ -2443,7 +2478,7 @@ bot.on("message", async (msg) => {
     const { ticketId, userId, firstName } = data;
     db.respondToTicket(ticketId, text, uid);
     bot.sendMessage(userId,
-      `💬 <b>Réponse du support :</b>\n\n${esc(text)}\n\n✅ Pour répondre, envoie un nouveau message via 🎫 Support.`,
+      `💬 <b>Réponse du support</b>\n\n${esc(text)}\n\n━━━━━━━━━━━━━━━━━━━━━━\n📩 Pour répondre, utilise 💬 Support dans le menu.`,
       { parse_mode: "HTML" }).catch(() => {});
     return bot.sendMessage(cid, `✅ Réponse envoyée à ${esc(firstName || String(userId))} (ticket #${ticketId}).`, { reply_markup: KB_ADMIN });
   }
@@ -2452,9 +2487,13 @@ bot.on("message", async (msg) => {
   if (s === "support_msg") {
     clearState(uid);
     db.createTicket(uid, "Support", text);
-    bot.sendMessage(cid, "✅ Message envoyé !\n\nNous vous répondrons dès que possible.", { reply_markup: KB_MAIN(uid) });
+    bot.sendMessage(cid,
+      `✅ <b>Message envoyé !</b>\n\nNous te répondrons dans les plus brefs délais.\nTu recevras une notification ici dès qu'un admin répond.`,
+      { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
     for (const aid of config.ADMIN_IDS) {
-      bot.sendMessage(aid, `🎫 <b>Ticket</b>\n👤 ${esc(user.first_name)} (${uid})\n💬 ${esc(text)}`, { parse_mode: "HTML" }).catch(() => {});
+      bot.sendMessage(aid,
+        `🎫 <b>Nouveau ticket #support</b>\n\n👤 ${esc(user.first_name)} · ID : <code>${uid}</code>\n\n💬 ${esc(text)}`,
+        { parse_mode: "HTML" }).catch(() => {});
     }
     return;
   }
@@ -2484,12 +2523,13 @@ payments.startAutoDepositChecker(db, config, async (deposit, usdAmount, tx) => {
       }
     }
 
+    const uAfterDep = db.getUser(deposit.user_id);
     await bot.sendMessage(deposit.user_id,
-      `✅ <b>Dépôt confirmé automatiquement !</b>\n\n` +
-      `💰 ${tx.amount} ${symbol} → <b>+${fmt(usdAmount)}</b>\n` +
-      `🔗 <code>${tx.txHash}</code>\n\n` +
-      `💳 Balance dépôt : <b>${fmt((db.getUser(deposit.user_id)).deposit_balance)}</b>\n\n` +
-      `ℹ️ Utilisable pour jeux et campagnes.`,
+      `✅ <b>Dépôt détecté et confirmé !</b>\n\n` +
+      `💎 ${tx.amount} ${symbol} → <b>+${fmt(usdAmount)}</b>\n` +
+      `🔗 TX : <code>${tx.txHash}</code>\n\n` +
+      `💳 Balance dépôt : <b>${fmt(uAfterDep ? (uAfterDep.deposit_balance || 0) : 0)}</b>\n\n` +
+      `Utilisable pour les mini-jeux et tes campagnes.`,
       { parse_mode: "HTML" });
   } catch (e) { console.error("Auto dep notif:", e.message); }
 });

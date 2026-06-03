@@ -203,7 +203,7 @@ function KB_MAIN(uid) {
 
 const KB_BALANCE  = KB([["💰 Déposer","🏧 Retirer"],["📋 Historique","📜 Transactions"],["🏠 Accueil"]]);
 const KB_TASKS    = KB([["📢 Canaux","👥 Groupes"],["🤖 Bots","🎮 Mini Apps"],["➕ Créer Campagne","📊 Mes Campagnes"],["🏠 Accueil"]]);
-const KB_GAMES    = KB([["🎡 Roue Fortune"],["🎲 Dés","🪙 Pile/Face"],["🏆 Jackpot","🔢 Devinette"],["🏠 Accueil"]]);
+const KB_GAMES    = KB([["🎡 Roue Fortune"], ["🎲 Dés", "🪙 Pile/Face"], ["🏆 Jackpot"], ["🏠 Accueil"]]);
 const KB_PARRAIN  = KB([["🔗 Mon Lien"],["🏠 Accueil"]]);
 const KB_ADMIN    = KB([
   ["📊 Stats","⚙️ Config Bot"],
@@ -417,13 +417,33 @@ bot.on("callback_query", async (q) => {
   // ─── Jeux ───
   if (data === "spin_free")  return doSpin(cid, mid, uid, true,  user);
   if (data === "spin_paid")  return doSpin(cid, mid, uid, false, user);
+  if (data === "spin_again") {
+    user = db.getUser(uid);
+    const cost2 = parseFloat(db.getSetting("spin_cost", config.SPIN_WHEEL.cost));
+    const total2 = (user.balance || 0) + (user.deposit_balance || 0);
+    const rows2 = [];
+    if ((user.free_spins || 0) > 0) rows2.push([{ text: `🎟️ Spin gratuit (${user.free_spins})`, callback_data: "spin_free" }]);
+    if (total2 >= cost2) rows2.push([{ text: `🎡 Rejouer — ${fmt(cost2)}`, callback_data: "spin_paid" }]);
+    if (!rows2.length) return bot.sendMessage(cid, `❌ Solde insuffisant pour rejouer (min ${fmt(cost2)}).`);
+    return bot.sendMessage(cid, `🎡 <b>ROUE DE FORTUNE</b>\n\n💰 Solde : <b>${fmt(total2)}</b>\n\n🍀 Tente encore ta chance !`, { parse_mode: "HTML", reply_markup: KBI(rows2) });
+  }
   if (data.startsWith("dice_")) return playDice(cid, uid, parseFloat(data.replace("dice_","")), user);
+  if (data === "dice_again") {
+    user = db.getUser(uid);
+    const minBd = parseFloat(db.getSetting("dice_min_bet", config.DICE_GAME.min_bet));
+    const maxBd = parseFloat(db.getSetting("dice_max_bet", config.DICE_GAME.max_bet));
+    const multD = parseFloat(db.getSetting("dice_multiplier", config.DICE_GAME.multiplier_win));
+    const totalD2 = (user.balance || 0) + (user.deposit_balance || 0);
+    const betsD = [0.05,0.10,0.25,0.50,1.00,2.00,5.00].filter(b=>b>=minBd&&b<=maxBd&&b<=totalD2);
+    if (!betsD.length) return bot.sendMessage(cid, `❌ Solde insuffisant. Min : ${fmt(minBd)}`);
+    const rowsD = betsD.reduce((acc,b,i)=>{ if(i%3===0) acc.push([]); acc[acc.length-1].push({text:`${fmt(b)}`,callback_data:`dice_${b}`}); return acc; },[]);
+    return bot.sendMessage(cid, `🎲 <b>DÉS</b>\n\nLance les dés — un <b>4, 5 ou 6</b> = ×${multD} !\n\n💰 Solde : <b>${fmt(totalD2)}</b>\n\nChoisis ta mise :`, { parse_mode: "HTML", reply_markup: KBI(rowsD) });
+  }
   if (data.startsWith("cf_choice_")) {
     const parts = data.split("_");
     return playCoinflip(cid, uid, parts[2], parseFloat(parts[3]), user);
   }
   if (data === "jackpot_play") return playJackpot(cid, uid, user);
-  if (data.startsWith("guess_")) return playGuess(cid, uid, parseInt(data.replace("guess_","")), user);
   if (data.startsWith("cf_bet_")) {
     const bet = parseFloat(data.replace("cf_bet_",""));
     user = db.getUser(uid);
@@ -473,6 +493,15 @@ bot.on("callback_query", async (q) => {
       `👛 Vers : <code>${wallet}</code>\n\n` +
       `⏳ Traitement sous 24h.`,
       { parse_mode: "HTML", reply_markup: KB_MAIN(uid) });
+    // Notif canal paiements — retrait en attente
+    const payChWd = db.getSetting("payment_channel", "");
+    if (payChWd) {
+      bot.sendMessage(payChWd,
+        `⏳ <b>Retrait en cours de traitement</b>\n\n` +
+        `💵 ${fmt(wd.net_amount)}\n` +
+        `📲 Paiement sous 24h — rejoins et gagne toi aussi !`,
+        { parse_mode: "HTML" }).catch(() => {});
+    }
     for (const aid of config.ADMIN_IDS) {
       bot.sendMessage(aid,
         `🏧 <b>Retrait #${wdId}</b>\n👤 ${esc(user.first_name)} (${uid})\n💵 ${fmt(wd.net_amount)} (frais: ${fmt(wd.fee)})\n👛 <code>${wallet}</code>\n📌 ${method}`,
@@ -626,7 +655,10 @@ bot.on("callback_query", async (q) => {
       const payChannel = db.getSetting("payment_channel","");
       if (payChannel) {
         bot.sendMessage(payChannel,
-          `✅ <b>Retrait effectué</b>\n💵 ${fmt(wd.net_amount)}${cryptoTxt}\n📲 Envoyé avec succès !`,
+          `💸 <b>Paiement envoyé !</b>\n\n` +
+          `💵 ${fmt(wd.net_amount)}${cryptoTxt}\n` +
+          `✅ Traitement réussi\n\n` +
+          `📲 Toi aussi, commence à gagner dès maintenant !`,
           { parse_mode: "HTML" }).catch(() => {});
       }
     }
@@ -1069,9 +1101,16 @@ async function doSpin(cid, mid, uid, free, user) {
   db.recordGame(uid, "spin_wheel", free ? 0 : cost, won, prize.label);
 
   const nu = db.getUser(uid);
+  const nuTotal = (nu.balance || 0) + (nu.deposit_balance || 0);
+  const replayRows = free || nuTotal < cost
+    ? []
+    : [[{ text: "🔄 Rejouer", callback_data: "spin_again" }]];
   bot.sendMessage(cid,
-    `🎡 <b>ROUE DE FORTUNE</b>\n\n🎰 ${prize.label}\n\n${won > 0 ? `🎉 Tu gagnes <b>${fmt(won)}</b> !` : "😢 Pas de chance !"}\n\n💰 Gains : ${fmt(nu.balance)}\n💳 Dépôt : ${fmt(nu.deposit_balance || 0)}`,
-    { parse_mode: "HTML" });
+    `🎡 <b>ROUE DE FORTUNE</b>\n\n` +
+    `🎰 ${prize.label}\n\n` +
+    `${won > 0 ? `🎉 Tu gagnes <b>+${fmt(won)}</b> !` : `😢 Pas de chance cette fois.`}\n\n` +
+    `💰 Solde total : <b>${fmt(nuTotal)}</b>`,
+    { parse_mode: "HTML", reply_markup: replayRows.length ? KBI(replayRows) : undefined });
 }
 
 async function playDice(cid, uid, bet, user) {
@@ -1086,9 +1125,9 @@ async function playDice(cid, uid, bet, user) {
   const val = diceMsg.dice.value;
   await new Promise(r => setTimeout(r, 3500));
 
-  // Gagne seulement sur 5 ou 6 (33% chance)
+  // Gagne sur 4, 5 ou 6 (50% chance) → house edge ~5% avec mult 1.9
   let win = 0;
-  if (val >= 5) {
+  if (val >= 4) {
     win = Math.round(bet * mult * 100) / 100;
     creditEarnings(uid, win, "dice_win", `Dés gain ${fmtUSD(win)}`);
   } else {
@@ -1099,9 +1138,15 @@ async function playDice(cid, uid, bet, user) {
 
   db.recordGame(uid, "dice", bet, win, String(val));
   const nu = db.getUser(uid);
+  const nuTotalD = (nu.balance || 0) + (nu.deposit_balance || 0);
+  const minBdR = parseFloat(db.getSetting("dice_min_bet", config.DICE_GAME.min_bet));
+  const diceAgainRows = nuTotalD >= minBdR ? [[{ text: "🔄 Rejouer", callback_data: "dice_again" }]] : [];
   bot.sendMessage(cid,
-    `🎲 <b>Résultat : ${val}</b>\n\n${win > 0 ? `🎉 Gagné ! +${fmt(win)}` : `😢 Perdu ! -${fmt(bet)}`}\n\n💰 Gains : ${fmt(nu.balance)}\n💳 Dépôt : ${fmt(nu.deposit_balance || 0)}`,
-    { parse_mode: "HTML" });
+    `🎲 <b>${val >= 4 ? "🎉 Gagné !" : "😢 Perdu !"}</b>\n\n` +
+    `Résultat : <b>${val}</b> ${val >= 4 ? "✅" : "❌"} (gagne sur 4·5·6)\n\n` +
+    `${win > 0 ? `+${fmt(win)} crédité` : `-${fmt(bet)} débité`}\n` +
+    `💰 Solde total : <b>${fmt(nuTotalD)}</b>`,
+    { parse_mode: "HTML", reply_markup: diceAgainRows.length ? KBI(diceAgainRows) : undefined });
 }
 
 async function playCoinflip(cid, uid, choice, bet, user) {
@@ -1115,8 +1160,8 @@ async function playCoinflip(cid, uid, choice, bet, user) {
 
   if (!debitSmart(uid, bet, "cf_bet", `Pile/Face mise ${fmtUSD(bet)}`))
     return bot.sendMessage(cid, "❌ Solde insuffisant.");
-  // 45% de chance de gagner (maison à 13.5% avec multiplicateur 1.9)
-  const userWinsRoll = Math.random() < 0.45;
+  // 48% de chance de gagner → house edge ~8.8% avec multiplicateur 1.9
+  const userWinsRoll = Math.random() < 0.48;
   const result = userWinsRoll ? choice : (choice === "pile" ? "face" : "pile");
   const won = result === choice;
 
@@ -1132,9 +1177,17 @@ async function playCoinflip(cid, uid, choice, bet, user) {
 
   db.recordGame(uid, "coinflip", bet, win, result);
   const nu = db.getUser(uid);
+  const nuTotalC = (nu.balance || 0) + (nu.deposit_balance || 0);
+  const minBc = parseFloat(db.getSetting("coinflip_min_bet", config.COINFLIP.min_bet));
+  const cfAgainRows = nuTotalC >= minBc ? [[{ text: "🔄 Rejouer", callback_data: `cf_bet_${bet}` }]] : [];
+  const resultEmoji = result === "pile" ? "🟡" : "⚫";
   bot.sendMessage(cid,
-    `🪙 <b>${result.toUpperCase()}</b>\n\nTu avais choisi : <b>${choice.toUpperCase()}</b>\n\n${won ? `🎉 Gagné ! +${fmt(win)}` : `😢 Perdu ! -${fmt(bet)}`}\n\n💰 Gains : ${fmt(nu.balance)}\n💳 Dépôt : ${fmt(nu.deposit_balance || 0)}`,
-    { parse_mode: "HTML" });
+    `🪙 <b>${won ? "🎉 Gagné !" : "😢 Perdu !"}</b>\n\n` +
+    `${resultEmoji} Résultat : <b>${result.toUpperCase()}</b>\n` +
+    `Tu avais misé sur : <b>${choice.toUpperCase()}</b>\n\n` +
+    `${won ? `+${fmt(win)} crédité` : `-${fmt(bet)} débité`}\n` +
+    `💰 Solde total : <b>${fmt(nuTotalC)}</b>`,
+    { parse_mode: "HTML", reply_markup: cfAgainRows.length ? KBI(cfAgainRows) : undefined });
 }
 
 async function playJackpot(cid, uid, user) {
@@ -1209,38 +1262,18 @@ async function playJackpot(cid, uid, user) {
 
   } else {
     db.setSetting("jackpot_pool", String(newPool));
-    bot.sendMessage(cid, `😢 <b>Pas de chance !</b>\n\nJackpot monte à <b>${fmt(newPool)}</b>\n🎟️ Réessaye !`, { parse_mode: "HTML" });
+    const nuJp = db.getUser(uid);
+    const nuTotalJp = (nuJp.balance || 0) + (nuJp.deposit_balance || 0);
+    const jpTryAgain = nuTotalJp >= cost ? [[{ text: "🎟️ Réessayer", callback_data: "jackpot_play" }]] : [];
+    bot.sendMessage(cid,
+      `🎟️ <b>Pas de chance cette fois !</b>\n\n` +
+      `🎰 Jackpot actuel : <b>${fmt(newPool)}</b>\n` +
+      `💰 Solde total : <b>${fmt(nuTotalJp)}</b>\n\n` +
+      `Plus le jackpot est haut, plus ça vaut le coup !`,
+      { parse_mode: "HTML", reply_markup: jpTryAgain.length ? KBI(jpTryAgain) : undefined });
   }
 }
 
-async function playGuess(cid, uid, guess, user) {
-  user = db.getUser(uid);
-  const cost  = parseFloat(db.getSetting("guess_cost", config.GUESS_NUMBER.cost));
-  const prize = parseFloat(db.getSetting("guess_prize", config.GUESS_NUMBER.prize));
-  const range = config.GUESS_NUMBER.range;
-  const total = (user.balance || 0) + (user.deposit_balance || 0);
-  if (total < cost) return bot.sendMessage(cid, "❌ Solde insuffisant !");
-
-  if (!debitSmart(uid, cost, "guess_bet", `Devinette`))
-    return bot.sendMessage(cid, "❌ Solde insuffisant.");
-  const secret = Math.floor(Math.random() * (range[1] - range[0] + 1)) + range[0];
-
-  let win = 0;
-  if (guess === secret) {
-    win = prize;
-    creditEarnings(uid, win, "guess_win", `Devinette gain`);
-  } else {
-    creditAdmin(cost * 0.90, "devinette");
-    const jp = parseFloat(db.getSetting("jackpot_pool","0"));
-    db.setSetting("jackpot_pool", String(Math.round((jp + cost * 0.10) * 100) / 100));
-  }
-
-  db.recordGame(uid, "guess", cost, win, String(secret));
-  const nu = db.getUser(uid);
-  bot.sendMessage(cid,
-    `🔢 <b>Résultat</b>\n\nTu as dit : <b>${guess}</b>\nRéponse : <b>${secret}</b>\n\n${win > 0 ? `🎉 Gagné ! +${fmt(win)}` : `😢 Perdu ! -${fmt(cost)}`}\n\n💰 Gains : ${fmt(nu.balance)}\n💳 Dépôt : ${fmt(nu.deposit_balance || 0)}`,
-    { parse_mode: "HTML" });
-}
 
 // ─────────────────────────────────────────────
 //  CONCOURS
@@ -1702,11 +1735,9 @@ function gameSettings() {
     { key: "spin_cost",          label: "🎡 Coût spin" },
     { key: "dice_multiplier",    label: "🎲 Dés multiplicateur" },
     { key: "coinflip_multiplier",label: "🪙 Pile/Face multiplicateur" },
-    { key: "jackpot_cost",       label: "🏆 Jackpot ticket" },
-    { key: "jackpot_chance",     label: "🏆 Jackpot chance %" },
-    { key: "jackpot_pool",       label: "🏆 Jackpot pool" },
-    { key: "guess_cost",         label: "🔢 Devinette coût" },
-    { key: "guess_prize",        label: "🔢 Devinette gain" },
+    { key: "jackpot_cost",        label: "🏆 Jackpot ticket" },
+    { key: "jackpot_chance",      label: "🏆 Jackpot chance %" },
+    { key: "jackpot_pool",        label: "🏆 Jackpot pool" },
   ];
 }
 
@@ -1978,8 +2009,9 @@ bot.on("message", async (msg) => {
     const rows = bets.reduce((acc,b,i) => { if(i%3===0) acc.push([]); acc[acc.length-1].push({text:`${fmt(b)}`,callback_data:`dice_${b}`}); return acc; }, []);
     return bot.sendMessage(cid,
       `🎲 <b>DÉS</b>\n\n` +
-      `Lance les dés — un 5 ou 6 = <b>x${mult}</b> !\n\n` +
-      `💵 Ton solde : <b>${fmt(totalD)}</b>\n\n` +
+      `Lance les dés — un <b>4, 5 ou 6</b> = ×<b>${mult}</b> ta mise !\n` +
+      `(probabilité 50/50)\n\n` +
+      `💰 Ton solde : <b>${fmt(totalD)}</b>\n\n` +
       `Choisis ta mise :`,
       { parse_mode: "HTML", reply_markup: KBI(rows) });
   }
@@ -1994,8 +2026,8 @@ bot.on("message", async (msg) => {
     const rows = bets.reduce((acc,b,i) => { if(i%3===0) acc.push([]); acc[acc.length-1].push({text:`${fmt(b)}`,callback_data:`cf_bet_${b}`}); return acc; }, []);
     return bot.sendMessage(cid,
       `🪙 <b>PILE / FACE</b>\n\n` +
-      `Bonne réponse = <b>x${mult}</b> ta mise !\n\n` +
-      `💵 Ton solde : <b>${fmt(totalC)}</b>\n\n` +
+      `Choisis bien — ×<b>${mult}</b> si tu gagnes !\n\n` +
+      `💰 Ton solde : <b>${fmt(totalC)}</b>\n\n` +
       `Choisis ta mise :`,
       { parse_mode: "HTML", reply_markup: KBI(rows) });
   }
@@ -2011,22 +2043,6 @@ bot.on("message", async (msg) => {
       `🎟️ Prix du ticket : ${fmt(cost)}\n\n` +
       `💵 Ton solde : ${fmt(total)}\n\n` +
       `🍀 Tente ta chance pour remporter la cagnotte !`,
-      { parse_mode: "HTML", reply_markup: KBI(rows) });
-  }
-  if (text === "🔢 Devinette") {
-    clearState(uid);
-    const cost  = parseFloat(db.getSetting("guess_cost", config.GUESS_NUMBER.cost));
-    const prize = parseFloat(db.getSetting("guess_prize", config.GUESS_NUMBER.prize));
-    const range = config.GUESS_NUMBER.range;
-    const nums  = [...Array(range[1]-range[0]+1)].map((_,i)=>i+range[0]);
-    const rows  = nums.reduce((acc,n,i)=>{ if(i%5===0) acc.push([]); acc[acc.length-1].push({ text:`${n}`, callback_data:`guess_${n}` }); return acc; },[]);
-    const totalG = (user.balance || 0) + (user.deposit_balance || 0);
-    return bot.sendMessage(cid,
-      `🔢 <b>DEVINE LE NOMBRE</b>\n\n` +
-      `Devine un nombre entre ${range[0]} et ${range[1]}\n` +
-      `🎟️ Coût : ${fmt(cost)}\n` +
-      `🏆 Gain : ${fmt(prize)}\n\n` +
-      `💵 Ton solde : ${fmt(totalG)}`,
       { parse_mode: "HTML", reply_markup: KBI(rows) });
   }
 
@@ -2490,6 +2506,21 @@ http.createServer((req, res) => {
   console.log(`✅ Keep-alive on port ${process.env.PORT || 3000}`);
 });
 
+// ─── Init depuis variables d'environnement (Railway / GitHub vars) ───
+if (!db.getSetting("payment_channel", "") && config.PAYMENT_CHANNEL) {
+  db.setSetting("payment_channel", config.PAYMENT_CHANNEL);
+}
+if (!db.getSetting("official_channel", "") && config.CHANNEL_USERNAME) {
+  const ch = config.CHANNEL_USERNAME.startsWith("@") ? config.CHANNEL_USERNAME : "@" + config.CHANNEL_USERNAME;
+  db.setSetting("official_channel", ch);
+}
+if (!db.getSetting("support_username", "") && config.SUPPORT_USERNAME) {
+  db.setSetting("support_username", config.SUPPORT_USERNAME);
+}
+if (!db.getSetting("bot_name", "") && config.BOT_NAME) {
+  db.setSetting("bot_name", config.BOT_NAME);
+}
+
 // ─── Init defaults ───
 const defaults = {
   "min_price_1h":  "0.001",
@@ -2499,8 +2530,8 @@ const defaults = {
   "min_price_bot": "0.001",
   "bot_wait_seconds": "30",
   "task_fee_percent":   "20",
-  "dice_multiplier":     "1.3",
-  "coinflip_multiplier": "1.4",
+  "dice_multiplier":     "1.9",
+  "coinflip_multiplier": "1.9",
   "jackpot_chance":      "0.2",
   "jackpot_cost":        "0.10",
   "guess_cost":          "0.05",
@@ -2512,16 +2543,9 @@ for (const [k, v] of Object.entries(defaults)) {
   }
 }
 
-// Reset des valeurs trop élevées (ancienne version)
-const cur_dice = parseFloat(db.getSetting("dice_multiplier", "1.3"));
-if (cur_dice >= 1.5) db.setSetting("dice_multiplier", "1.3");
-const cur_cf = parseFloat(db.getSetting("coinflip_multiplier", "1.4"));
-if (cur_cf >= 1.5) db.setSetting("coinflip_multiplier", "1.4");
+// Correction des mauvaises valeurs héritées
 const cur_jp = parseFloat(db.getSetting("jackpot_chance", "0.2"));
 if (cur_jp >= 1) db.setSetting("jackpot_chance", "0.2");
-// Devinette en mode agressif
-const cur_gp = parseFloat(db.getSetting("guess_prize", "0.20"));
-if (cur_gp >= 0.30) db.setSetting("guess_prize", "0.20");
 // Reset min prices si trop élevés
 ["min_price_1h", "min_price_12h", "min_price_24h", "min_price_48h", "min_price_bot"].forEach(k => {
   const v = parseFloat(db.getSetting(k, "0.001"));
